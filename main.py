@@ -859,7 +859,7 @@ def send_hourly_batch():
     for s in sorted_q:
         if s["coin"] in hourly_queue: del hourly_queue[s["coin"]]
     sent_coins=[]; last_batch_time=time.time()
-  def check_active_trades():
+    def check_active_trades():
     for coin,trade in list(active_trades.items()):
         price=get_price(trade["symbol"])
         if not price: continue
