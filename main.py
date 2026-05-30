@@ -20,8 +20,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIGURATION =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -96,8 +96,17 @@ ATR_TP_MULTIPLIER        = 5.0
 MAX_DAILY_LOSSES         = 3
 WHALE_TRADE_THRESHOLD    = 500000
 ATR_VOLATILITY_RATIO     = 3.0
-CONSEC_LOSS_SUSPEND      = 3     # suspend pattern after 3 consecutive losses
+CONSEC_LOSS_SUSPEND      = 5     # suspend pattern after 5 consecutive losses (was 3)
+MIN_SIGNALS_TO_SUSPEND   = 15    # must have 15+ signals before suspension can trigger
+SUSPEND_HOURS            = 12    # suspend for 12 hours only (was 24)
+ADX_MIN_TREND_STRENGTH   = 25    # skip signals when ADX below this (no clear trend)
 BTC_CORRELATED           = ["ETH","BNB","SOL","AVAX","NEAR","APT","SUI"]
+
+# Leverage caps per coin tier — safe maximums
+LEV_TIER_1  = ["BTC","ETH"]                                          # max 12x
+LEV_TIER_2  = ["BNB","SOL","XRP","ADA","AVAX","DOT","LINK","LTC"]   # max 8x
+LEV_TIER_3  = ["DOGE","SHIB","PEPE","WIF","FLOKI","BONK","DOGS",
+                "BOME","NOT","APE","GMT","CHZ","GALA","SAND","MANA"] # max 3x (meme/low cap)
 
 BOT_VERSION = "v32"
 BOT_NAME    = "TRADING SIGNAL MASTER"
@@ -283,6 +292,51 @@ def calculate_atr(klines: list, period: int = 14) -> float:
         trs.append(max(h-l, abs(h-pc), abs(l-pc)))
     return sum(trs[-period:]) / period
 
+# ================= ADX INDICATOR =================
+def calculate_adx(klines: list, period: int = 14) -> float:
+    """
+    Average Directional Index — measures trend strength.
+    > 25 = strong trend (good for signals)
+    < 20 = sideways/no trend (skip signals)
+    """
+    if len(klines) < period * 2 + 1:
+        return 30.0  # default to allowing signals if not enough data
+    try:
+        highs  = [float(k[2]) for k in klines]
+        lows   = [float(k[3]) for k in klines]
+        closes = [float(k[4]) for k in klines]
+
+        plus_dm, minus_dm, tr_list = [], [], []
+        for i in range(1, len(klines)):
+            h_diff = highs[i] - highs[i-1]
+            l_diff = lows[i-1] - lows[i]
+            plus_dm.append(h_diff if h_diff > l_diff and h_diff > 0 else 0)
+            minus_dm.append(l_diff if l_diff > h_diff and l_diff > 0 else 0)
+            tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+            tr_list.append(tr)
+
+        def smooth(data, p):
+            s = sum(data[:p])
+            result = [s]
+            for v in data[p:]:
+                s = s - s/p + v
+                result.append(s)
+            return result
+
+        atr_s    = smooth(tr_list, period)
+        pdm_s    = smooth(plus_dm, period)
+        mdm_s    = smooth(minus_dm, period)
+        pdi_list = [100*p/a if a != 0 else 0 for p,a in zip(pdm_s, atr_s)]
+        mdi_list = [100*m/a if a != 0 else 0 for m,a in zip(mdm_s, atr_s)]
+        dx_list  = [100*abs(p-m)/(p+m) if (p+m) != 0 else 0 for p,m in zip(pdi_list, mdi_list)]
+
+        if len(dx_list) < period:
+            return 30.0
+        adx = sum(dx_list[-period:]) / period
+        return adx
+    except Exception:
+        return 30.0  # default allow on error
+
 # ================= MARKET CONDITION =================
 def detect_market_condition(btc_price: float, btc_klines: list) -> str:
     try:
@@ -302,35 +356,28 @@ def detect_market_condition(btc_price: float, btc_klines: list) -> str:
 # ================= SMART POSITION SIZING =================
 def get_smart_leverage(symbol: str, atr_pct: float, score: float) -> int:
     """
-    Dynamically adjusts leverage based on setup quality score.
-    Higher confidence = higher leverage (within safe limits).
+    Safe leverage system with hard caps per coin tier.
+    Tier 1 (BTC/ETH): max 12x
+    Tier 2 (top altcoins): max 8x
+    Tier 3 (meme/low cap): max 3x
     """
     base = symbol.replace("USDT","")
-    if base in ["BTC","ETH"]:
-        base_lev = 10
-    elif base in ["BNB","SOL"]:
-        base_lev = 8
+    if base in LEV_TIER_1:
+        base_lev = 10; hard_cap = 12
+    elif base in LEV_TIER_2:
+        base_lev = 6;  hard_cap = 8
+    elif base in LEV_TIER_3:
+        base_lev = 2;  hard_cap = 3
     elif atr_pct < 2.0:
-        base_lev = 8
+        base_lev = 5;  hard_cap = 7
     elif atr_pct < 4.0:
-        base_lev = 5
+        base_lev = 4;  hard_cap = 6
     else:
-        base_lev = 4
-
-    # Score-based multiplier
-    if score >= 99:
-        multiplier = 2.0
-    elif score >= 98:
-        multiplier = 1.75
-    elif score >= 97:
-        multiplier = 1.5
-    elif score >= 96:
-        multiplier = 1.25
-    else:
-        multiplier = 1.0
-
-    final_lev = int(base_lev * multiplier)
-    return min(final_lev, 20)  # hard cap at 20x
+        base_lev = 3;  hard_cap = 5
+    if score >= 99:    bonus = 2
+    elif score >= 97:  bonus = 1
+    else:              bonus = 0
+    return min(base_lev + bonus, hard_cap)
 
 # ================= SIGNAL QUALITY GRADE =================
 def get_signal_grade(score: float, whale: bool, oi_rising, tf_score: int,
@@ -520,13 +567,14 @@ def learn_from_trade(coin: str, pattern: str, result: str,
     if result=="LOSS":
         consecutive_loss_patterns[pattern]["consecutive_losses"] += 1
         cl = consecutive_loss_patterns[pattern]["consecutive_losses"]
-        if cl >= CONSEC_LOSS_SUSPEND:
-            su = (datetime.now(IST)+timedelta(hours=24)).isoformat()
+        sigs = pattern_stats.get(pattern,{}).get("signals",0)
+        if cl >= CONSEC_LOSS_SUSPEND and sigs >= MIN_SIGNALS_TO_SUSPEND:
+            su = (datetime.now(IST)+timedelta(hours=SUSPEND_HOURS)).isoformat()
             consecutive_loss_patterns[pattern]["suspended_until"] = su
             send_telegram(
                 f"🧠 <b>{BOT_HEADER} Pattern Suspended</b>\n\n"
-                f"'{pattern}' has {cl} consecutive losses.\n"
-                f"Suspended for 24 hours automatically. 🔒"
+                f"'{pattern}' — {cl} consecutive losses ({sigs} total).\n"
+                f"Suspended {SUSPEND_HOURS}h automatically. 🔒"
             )
     else:
         consecutive_loss_patterns[pattern]["consecutive_losses"] = 0
@@ -628,45 +676,101 @@ def get_learning_text() -> str:
 
 # ================= NEWS =================
 def get_crypto_news() -> str:
-    items = []
-    if NEWS_API_KEY:
-        try:
-            res = requests.get("https://cryptopanic.com/api/v1/posts/",
-                               params={"auth_token":NEWS_API_KEY,"kind":"news","filter":"hot"},
-                               timeout=10)
-            if res.status_code==200:
-                for item in res.json().get("results",[])[:5]:
-                    items.append(f"📰 {item['title'][:80]}")
-        except Exception as e: logger.warning(f"CryptoPanic failed: {e}")
+    """
+    Fetches real crypto news headlines from free sources:
+    - CoinDesk RSS (no API key needed)
+    - CryptoCompare news API (no API key needed)
+    - CryptoPanic (if API key set)
+    - Fear & Greed Index
+    - Live top coin prices
+    """
+    headlines = []
 
+    # Source 1: CryptoCompare — free, real headlines, no key needed
+    try:
+        res = requests.get(
+            "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&sortOrder=latest",
+            timeout=10
+        )
+        if res.status_code == 200:
+            articles = res.json().get("Data", [])[:6]
+            for article in articles:
+                title = article.get("title","")[:90]
+                source = article.get("source_info",{}).get("name","")
+                if title:
+                    headlines.append(f"📰 {title} — {source}")
+    except Exception as e:
+        logger.warning(f"CryptoCompare news failed: {e}")
+
+    # Source 2: CryptoPanic (if API key available)
+    if NEWS_API_KEY and not headlines:
+        try:
+            res = requests.get(
+                "https://cryptopanic.com/api/v1/posts/",
+                params={"auth_token":NEWS_API_KEY,"kind":"news","filter":"hot"},
+                timeout=10
+            )
+            if res.status_code == 200:
+                for item in res.json().get("results",[])[:5]:
+                    headlines.append(f"📰 {item['title'][:90]}")
+        except Exception as e:
+            logger.warning(f"CryptoPanic failed: {e}")
+
+    # Fear & Greed Index
+    fng_text = ""
     try:
         res = requests.get("https://api.alternative.me/fng/?limit=3", timeout=10)
-        if res.status_code==200:
-            data=res.json()["data"]; latest=data[0]
-            yesterday=data[1] if len(data)>1 else None
-            fng_val=int(latest["value"]); fng_cls=latest["value_classification"]
-            change=""
+        if res.status_code == 200:
+            data      = res.json()["data"]
+            latest    = data[0]
+            yesterday = data[1] if len(data) > 1 else None
+            fng_val   = int(latest["value"])
+            fng_cls   = latest["value_classification"]
+            change    = ""
             if yesterday:
-                diff=fng_val-int(yesterday["value"])
-                change=f" ({'+' if diff>=0 else ''}{diff} vs yesterday)"
-            items.append(f"😱 Fear & Greed: {fng_val} — {fng_cls}{change}")
-    except Exception as e: logger.warning(f"F&G news failed: {e}")
+                diff   = fng_val - int(yesterday["value"])
+                change = f" ({'+' if diff >= 0 else ''}{diff} vs yesterday)"
+            if fng_val <= 25:
+                fng_emoji = "😨"
+            elif fng_val <= 45:
+                fng_emoji = "😟"
+            elif fng_val <= 55:
+                fng_emoji = "😐"
+            elif fng_val <= 75:
+                fng_emoji = "😊"
+            else:
+                fng_emoji = "🤑"
+            fng_text = f"{fng_emoji} Fear & Greed: <b>{fng_val} — {fng_cls}</b>{change}"
+    except Exception as e:
+        logger.warning(f"F&G failed: {e}")
 
+    # Live prices
+    price_text = ""
     try:
-        btc=get_price("BTCUSDT"); eth=get_price("ETHUSDT"); sol=get_price("SOLUSDT")
-        bnb=get_price("BNBUSDT"); xrp=get_price("XRPUSDT")
-        if btc: items.append(f"₿  BTC:  ${btc:>12,.2f}")
-        if eth: items.append(f"Ξ  ETH:  ${eth:>12,.2f}")
-        if sol: items.append(f"◎  SOL:  ${sol:>12,.2f}")
-        if bnb: items.append(f"🔶 BNB:  ${bnb:>12,.2f}")
-        if xrp: items.append(f"✦  XRP:  ${xrp:>12,.4f}")
-    except Exception as e: logger.warning(f"Price snap failed: {e}")
+        btc = get_price("BTCUSDT"); eth = get_price("ETHUSDT")
+        sol = get_price("SOLUSDT"); bnb = get_price("BNBUSDT")
+        xrp = get_price("XRPUSDT")
+        lines = []
+        if btc: lines.append(f"₿  BTC  ${btc:>12,.2f}")
+        if eth: lines.append(f"Ξ  ETH  ${eth:>12,.2f}")
+        if sol: lines.append(f"◎  SOL  ${sol:>12,.2f}")
+        if bnb: lines.append(f"🔶 BNB  ${bnb:>12,.2f}")
+        if xrp: lines.append(f"✦  XRP  ${xrp:>12,.4f}")
+        price_text = "<b>💰 Live Prices:</b>\n<code>" + "\n".join(lines) + "</code>"
+    except Exception as e:
+        logger.warning(f"Price snap failed: {e}")
 
-    if not items:
-        return f"📰 <b>{BOT_HEADER} Market News</b>\n\nNo news available. Try again shortly."
-    msg  = f"📰 <b>{BOT_HEADER} Market Update — {get_ist_time()}</b>\n\n"
-    msg += "\n\n".join(items)
-    msg += f"\n\n🔄 Refreshed: {get_ist_time()}"
+    msg = f"📰 <b>{BOT_HEADER} Market Update — {get_ist_time()}</b>\n\n"
+    if fng_text:
+        msg += fng_text + "\n\n"
+    if price_text:
+        msg += price_text + "\n\n"
+    if headlines:
+        msg += "<b>🗞️ Latest Crypto News:</b>\n\n"
+        msg += "\n\n".join(headlines[:5])
+    else:
+        msg += "No news headlines available right now."
+    msg += f"\n\n🔄 Updated: {get_ist_time()}"
     return msg
 
 # ================= BACKTESTING =================
@@ -901,6 +1005,11 @@ def detect_patterns(symbol: str, klines: list, price: float, btc_trend: int) -> 
     rsi=calculate_rsi(closes); ema20=calculate_ema(closes,20); ema50=calculate_ema(closes,50)
 
     if ((max(highs[-20:])-min(lows[-20:]))/price)*100 < 1.8: return []
+
+    # ADX filter — skip signals in trendless/sideways markets
+    adx = calculate_adx(klines)
+    if adx < ADX_MIN_TREND_STRENGTH:
+        return []
 
     p=[]; sup=min(lows[-30:-1]); res=max(highs[-30:-1])
 
