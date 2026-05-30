@@ -270,7 +270,7 @@ def calculate_atr(klines: list, period: int = 14) -> float:
         h=float(klines[i][2]); l=float(klines[i][3]); pc=float(klines[i-1][4])
         trs.append(max(h-l, abs(h-pc), abs(l-pc)))
     return sum(trs[-period:]) / period
-    def detect_market_condition(btc_price: float, btc_klines: list) -> str:
+def detect_market_condition(btc_price: float, btc_klines: list) -> str:
     try:
         closes    = [float(k[4]) for k in btc_klines]
         ema20     = calculate_ema(closes, 20)
@@ -547,7 +547,7 @@ def get_crypto_news():
     msg=f"📰 <b>{BOT_HEADER} Market Update — {get_ist_time()}</b>\n\n"
     msg+="\n\n".join(items); msg+=f"\n\n🔄 Refreshed: {get_ist_time()}"
     return msg
-  def run_backtest(symbol):
+def run_backtest(symbol):
     try:
         klines=get_klines(symbol,"15m",1000)
         if not klines or len(klines)<100: return f"Not enough data for {symbol}"
@@ -760,7 +760,7 @@ def check_partial_tp(coin, trade, price, pnl):
         active_trades[coin]["sl"]=trade["entry"]
         save_active_trades()
         send_telegram(f"💰 <b>{BOT_HEADER} PARTIAL TP: {coin}</b>\n50% closed at {format_price(price)}\nSL → entry 🎯 | PnL: {pnl:+.2f}%")
-      def get_news_headlines(coin):
+def get_news_headlines(coin):
     if not NEWS_API_KEY: return []
     try:
         res=requests.get("https://cryptopanic.com/api/v1/posts/",
@@ -859,7 +859,7 @@ def send_hourly_batch():
     for s in sorted_q:
         if s["coin"] in hourly_queue: del hourly_queue[s["coin"]]
     sent_coins=[]; last_batch_time=time.time()
-def check_active_trades():
+  def check_active_trades():
     for coin,trade in list(active_trades.items()):
         price=get_price(trade["symbol"])
         if not price: continue
@@ -1003,7 +1003,7 @@ def poll_telegram():
         except requests.RequestException as e: logger.error(f"Poll request error: {e}")
         except Exception as e:                 logger.error(f"Poll error: {e}",exc_info=True)
         time.sleep(2)
-     def send_hourly_report():
+def send_hourly_report():
     r  = f"📊 <b>{BOT_HEADER} Hourly — {get_ist_time()}</b>\n\n"
     r += f"Active: {len(active_trades)} | Pending: {len(pending_signals)}\n"
     r += f"🛡️ Circuit Breaker: {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n\n"
@@ -1171,4 +1171,4 @@ def main():
             logger.error(f"Main loop error: {e}",exc_info=True); time.sleep(60)
 
 if __name__ == "__main__":
-    main()   
+    main()
