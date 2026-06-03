@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -56,12 +56,16 @@ learning_notes             = []
 daily_sent_coins           = set()
 consecutive_loss_patterns  = {}
 price_alerts               = {}
+coin_cooldowns             = {}   # {coin: datetime} — cooldown after loss
 market_memory = {
     "bull":     {"wins": 0, "losses": 0, "best_pattern": None},
     "bear":     {"wins": 0, "losses": 0, "best_pattern": None},
     "sideways": {"wins": 0, "losses": 0, "best_pattern": None}
 }
-pattern_stats = {p: {"signals": 0, "wins": 0, "losses": 0, "total_pnl": 0.0} for p in [
+pattern_stats = {p: {"signals": 0, "wins": 0, "losses": 0, "total_pnl": 0.0,
+                      "weight": 1.0,  # adaptive weight — updates after every trade
+                      "bull_wr": 0.0, "bear_wr": 0.0, "sideways_wr": 0.0
+                      } for p in [
     "EMA Trend","Breakout","Pullback to 20 EMA","RSI Reversal","Momentum Surge",
     "Volume Spike","Double Bottom","Double Top","Support Bounce","Resistance Rejection",
     "Bullish Engulfing","Bearish Engulfing","Volume Breakout","Bull Flag Break","Bear Flag Break"
@@ -78,8 +82,8 @@ last_weekly_report_day = None
 SCAN_INTERVAL            = 300
 BATCH_INTERVAL           = 1800
 RIVER_INTERVAL           = 900
-MIN_SETUP_SCORE          = 95
-MIN_PRIMARY_SCORE        = 90
+MIN_SETUP_SCORE          = 91
+MIN_PRIMARY_SCORE        = 82
 INSTANT_SIGNAL_THRESHOLD = 97
 MIN_PROFIT_TARGET        = 20.0
 DELAY_BETWEEN_COINS      = 0.15
@@ -96,7 +100,7 @@ ATR_VOLATILITY_RATIO     = 3.0
 CONSEC_LOSS_SUSPEND      = 5
 MIN_SIGNALS_TO_SUSPEND   = 15
 SUSPEND_HOURS            = 12
-ADX_MIN_TREND             = 25
+ADX_MIN_TREND             = 18
 ST_PERIOD                = 10
 ST_MULTIPLIER            = 3.0
 MIN_SL_PCT               = 0.02
@@ -396,7 +400,7 @@ def is_candle_strong(klines):
         last  = klines[-1]
         body  = abs(float(last[4]) - float(last[1]))
         total = float(last[2]) - float(last[3])
-        return (body / total) >= 0.55 if total > 0 else False
+        return (body / total) >= 0.45 if total > 0 else False
     except Exception: return True
 
 # ================= MARKET CONDITION =================
@@ -517,7 +521,7 @@ def get_signal_grade(score, whale, oi_rising, tf_score, vol_ok, rsi_ok,
 # ================= FILTERS =================
 def is_volume_confirmed(klines):
     vols = [float(k[5]) for k in klines]
-    return len(vols) >= 20 and vols[-1] > sum(vols[-20:]) / 20 * 1.1
+    return len(vols) >= 20 and vols[-1] > sum(vols[-20:]) / 20 * 1.05
 
 def is_rsi_valid(closes, direction):
     rsi = calculate_rsi(closes)
@@ -651,6 +655,22 @@ def learn_from_trade(coin, pattern, result, pnl, mc, tf_score):
     else:
         consecutive_loss_patterns[pattern]["consecutive_losses"] = 0
         consecutive_loss_patterns[pattern]["suspended_until"]    = None
+    # Adaptive weight update — ML-like self-learning
+    if pattern in pattern_stats:
+        s    = pattern_stats[pattern]
+        sigs = s.get("signals", 0)
+        if sigs >= 3:
+            wr = (s["wins"] / sigs) * 100
+            # Update weight based on win rate
+            if wr >= 70:   s["weight"] = min(s["weight"] + 0.1, 1.5)   # boost good patterns
+            elif wr < 40:  s["weight"] = max(s["weight"] - 0.15, 0.5)  # reduce bad patterns
+            # Update market condition win rates
+            mc_trades = [t for t in trade_journal if t.get("pattern") == pattern and t.get("market_condition") == mc]
+            mc_wins   = sum(1 for t in mc_trades if t["result"] == "WIN")
+            mc_wr     = (mc_wins / len(mc_trades) * 100) if mc_trades else 50.0
+            s[f"{mc}_wr"] = round(mc_wr, 1)
+            logger.info(f"Pattern weight update: {pattern} weight={s['weight']:.2f} wr={wr:.1f}%")
+
     stats = pattern_stats.get(pattern, {}); sigs = stats.get("signals", 0); note = None
     if sigs >= 5:
         wr = (stats["wins"] / sigs) * 100
@@ -668,6 +688,47 @@ def learn_from_trade(coin, pattern, result, pnl, mc, tf_score):
         if "⚠️" in note or "📉" in note:
             send_telegram(f"🧠 <b>{BOT_HEADER} Auto Learning Alert</b>\n{S()}\n{note}\n{S()}")
     save_learning()
+
+
+# ================= ADAPTIVE PATTERN SCORING =================
+def get_adjusted_score(pattern_name, base_score, market_condition):
+    """
+    Replaces hardcoded base scores with live performance-adjusted scores.
+    Patterns earn their rank through real trade results.
+    After enough data, a low-base pattern with high win rate will
+    naturally outscore a high-base pattern that keeps losing.
+    """
+    stats   = pattern_stats.get(pattern_name, {})
+    signals = stats.get("signals", 0)
+    if signals < 5:
+        return base_score  # not enough data yet — trust base score
+
+    overall_wr = (stats["wins"] / signals) * 100
+    mc_wr      = stats.get(f"{market_condition}_wr", overall_wr)
+    weight     = stats.get("weight", 1.0)
+
+    # Blend real performance with base score
+    # More trades = more weight given to real performance
+    if signals >= 20:   pf = 0.6
+    elif signals >= 10: pf = 0.4
+    else:               pf = 0.2
+
+    adjusted = (base_score * (1 - pf) + mc_wr * pf) * weight
+    return min(round(adjusted, 1), 99.0)
+
+def get_all_pattern_scores(patterns, market_condition):
+    """
+    Returns all detected patterns with their adjusted scores.
+    No pattern is discarded — all are ranked by live performance.
+    BUY and SELL patterns are separated so we pick best of each direction.
+    """
+    scored = []
+    for name, base_score, direction in patterns:
+        adj_score = get_adjusted_score(name, base_score, market_condition)
+        scored.append((name, adj_score, direction, base_score))
+    # Sort by adjusted score descending
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
 
 def generate_weekly_insight():
     today = datetime.now(IST).date()
@@ -946,6 +1007,15 @@ def get_learning_text():
     susp = [p for p,d in consecutive_loss_patterns.items()
             if d.get("consecutive_losses",0) >= CONSEC_LOSS_SUSPEND and d.get("suspended_until")]
     text += f"\n<b>🔒 Suspended:</b> {', '.join(susp) if susp else 'None'}\n"
+    text += f"\n{S()}\n<b>🎯 Pattern Weight Evolution:</b>\n"
+    text += "<i>(How the bot has adjusted each pattern based on results)</i>\n\n"
+    for pat, s in sorted(pattern_stats.items(),
+                         key=lambda x: x[1].get("weight", 1.0), reverse=True):
+        w    = s.get("weight", 1.0)
+        sigs = s.get("signals", 0)
+        if sigs > 0:
+            trend = "📈 Boosted" if w > 1.0 else "📉 Reduced" if w < 1.0 else "➖ Neutral"
+            text += f"  {trend} <b>{pat}</b> ({w:.2f}x) — {sigs} signals\n"
     text += f"\n{S()}\n<b>💡 Latest Insights:</b>\n\n"
     for note in learning_notes[-10:]: text += f"• {note}\n\n"
     text += S()
@@ -1090,14 +1160,17 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
     if not vol_ok or not rsi_ok or not is_volatility_normal(klines_15m) or not funding_ok:
         return False
 
-    if not is_candle_strong(klines_15m):
-        logger.info(f"{coin} — weak candle body, skipping"); return False
+    candle_strong = is_candle_strong(klines_15m)
+    # Candle strength is informational — weak candles get noted but not blocked
+    if not candle_strong:
+        logger.info(f"{coin} — weak candle body noted")
 
     st_15m = calculate_supertrend(klines_15m, ST_PERIOD, ST_MULTIPLIER)
     st_1h  = calculate_supertrend(klines_1h,  ST_PERIOD, ST_MULTIPLIER) if klines_1h else st_15m
     st_ok  = (st_15m == setup["direction"]) and (st_1h == setup["direction"])
+    # SuperTrend is informational — shown in signal but does not block
     if not st_ok:
-        logger.info(f"{coin} rejected — SuperTrend disagrees ({st_15m}/{st_1h})"); return False
+        logger.info(f"{coin} — SuperTrend disagrees ({st_15m}/{st_1h}) — noted but not blocking")
 
     vwap      = calculate_vwap(klines_15m)
     vwap_ok   = False; vwap_label = "➖ N/A"
@@ -1159,6 +1232,10 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
                                  vol_ok, rsi_ok, funding_ok, st_ok, vwap_ok, zone_ok, adx_val)
     sl_pct    = abs(entry-sl)/entry*100
     tp_pct    = abs(tp-entry)/entry*100
+    rr_ratio  = tp_pct / sl_pct if sl_pct > 0 else 0
+    # Position size suggestion based on 1% account risk
+    suggested_size_pct = 1.0 / (sl_pct * lev / 100) * 100 if sl_pct > 0 else 2.0
+    suggested_size_pct = min(suggested_size_pct, 10.0)  # cap at 10% of capital
 
     if is_instant: header = f"⚡ <b>{BOT_HEADER}</b>\n<b>INSTANT SIGNAL — {coin}</b>"
     elif is_river: header = f"🌊 <b>{BOT_HEADER}</b>\n<b>RIVER SIGNAL</b>"
@@ -1172,9 +1249,16 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
     msg += f"💰 Entry:  <code>{format_price(entry)}</code>\n"
     msg += f"🎯 TP:     <code>{format_price(tp)}</code>  (+{tp_pct:.2f}%)\n"
     msg += f"🛑 SL:     <code>{format_price(sl)}</code>  (-{sl_pct:.2f}%)\n\n"
-    msg += f"📈 Profit Target: <b>{profit_target:.2f}%</b>\n"
+    msg += f"📈 Profit Target: <b>{profit_target:.2f}%</b>  |  RR: <b>1:{rr_ratio:.1f}</b>\n"
+    msg += f"💡 Suggested Size: ~{suggested_size_pct:.1f}% of capital\n"
     msg += f"{S()}\n"
-    msg += f"📌 Pattern:     {setup['pattern']}\n"
+    # Show adjusted score vs base for transparency
+    primary_name  = setup["pattern"].split(" + ")[0]
+    base_s        = next((x[1] for x in detect_patterns(setup["symbol"], klines_15m, entry, 1)
+                          if x[0] == primary_name), setup["setup_score"])
+    adj_s         = get_adjusted_score(primary_name, base_s, market_condition)
+    score_note    = f" (base:{base_s:.0f} → live:{adj_s:.0f})" if abs(adj_s - base_s) > 1 else ""
+    msg += f"📌 Pattern:     {setup['pattern']}{score_note}\n"
     msg += f"📊 RSI: {rsi_val:.1f}  |  ADX: {adx_val:.1f}  |  Momentum: {mom:+.2f}%\n"
     msg += f"📊 TF Align:    {tf_label}\n"
     msg += f"📊 SuperTrend:  {'✅ Confirmed' if st_ok else '⚠️ Mixed'} ({st_15m}/{st_1h})\n"
@@ -1272,6 +1356,10 @@ def check_active_trades():
                     pattern_stats[primary]["total_pnl"]+=pnl
                     pattern_stats[primary]["wins" if hit=="WIN" else "losses"]+=1
                 increment_daily_losses(pnl)
+                # 4-hour cooldown on this coin after a loss
+                if hit == "LOSS":
+                    coin_cooldowns[coin] = get_ist_datetime() + timedelta(hours=4)
+                    logger.info(f"Cooldown set for {coin} — 4 hours")
                 duration = ""
                 if trade.get("timestamp"):
                     mins     = int((get_ist_datetime()-trade["timestamp"]).total_seconds()/60)
@@ -1387,12 +1475,32 @@ def poll_telegram():
                             send_telegram(f"🔴 <b>{BOT_HEADER}</b>\nCircuit Breaker ACTIVE\nResumes at midnight IST.\nLosses today: {daily_losses}/{MAX_DAILY_LOSSES}")
                         else:
                             send_telegram(f"🟢 <b>{BOT_HEADER}</b>\nCircuit Breaker OK\nLosses today: {daily_losses}/{MAX_DAILY_LOSSES}")
+                    elif txt=="/patterns":
+                        msg  = f"📊 <b>{BOT_HEADER} All 15 Patterns Ranked</b>\n{S()}\n\n"
+                        msg += "<b>Ranked by live performance (adjusts over time):</b>\n\n"
+                        all_pats = []
+                        for pat, s in pattern_stats.items():
+                            sigs = s.get("signals", 0)
+                            wr   = (s["wins"] / sigs * 100) if sigs > 0 else 0
+                            w    = s.get("weight", 1.0)
+                            adj  = get_adjusted_score(pat, 80, "bull")
+                            all_pats.append((pat, sigs, wr, w, adj))
+                        all_pats.sort(key=lambda x: x[4], reverse=True)
+                        for i, (pat, sigs, wr, w, adj) in enumerate(all_pats, 1):
+                            flag  = "🔴" if wr < 40 and sigs >= 5 else "🟡" if wr < 60 and sigs >= 5 else "🟢"
+                            susp  = " 🔒" if is_pattern_suspended(pat) else ""
+                            trend = "📈" if w > 1.0 else "📉" if w < 1.0 else "➖"
+                            msg  += f"{i:2}. {flag} <b>{pat}</b>{susp}\n"
+                            msg  += f"    Signals: {sigs} | WR: {wr:.1f}% | Weight: {trend}{w:.2f}\n\n"
+                        msg += S()
+                        send_telegram(msg)
                     elif txt=="/help":
                         msg  = f"📖 <b>{BOT_HEADER} Commands</b>\n{S()}\n\n"
                         msg += "📊 <b>Performance</b>\n"
                         msg += "  /trades    — Active trades\n"
                         msg += "  /pending   — Pending signals\n"
                         msg += "  /stats     — Pattern performance\n"
+                        msg += "  /patterns  — All 15 patterns ranked live\n"
                         msg += "  /summary   — Last 10 days\n"
                         msg += "  /streak    — Win/loss streak\n"
                         msg += "  /best      — Top coins & patterns\n"
@@ -1496,45 +1604,89 @@ def scan_river(now, market_condition):
     except Exception as e: logger.error(f"River: {e}",exc_info=True)
 
 # ================= COIN SCAN =================
+def is_btc_crashing() -> bool:
+    """Block all BUY signals if BTC dropped more than 5% in last 4 hours."""
+    try:
+        klines = get_klines("BTCUSDT", "1h", 5)
+        if not klines or len(klines) < 4: return False
+        price_now  = float(klines[-1][4])
+        price_4h   = float(klines[-4][4])
+        drop_pct   = ((price_now - price_4h) / price_4h) * 100
+        if drop_pct < -5.0:
+            logger.info(f"BTC crashed {drop_pct:.1f}% in 4h — blocking BUY signals")
+            return True
+        return False
+    except Exception: return False
+
 def scan_coins(btc_trend, fng, market_condition):
+    btc_crashing = is_btc_crashing()
     for coin in COINS:
         try:
             symbol=coin+"USDT"; price=get_price(symbol); klines=get_klines(symbol,"15m")
             if not price or not klines: continue
+            # Skip coin if it is in cooldown after a recent loss
+            if coin in coin_cooldowns:
+                cooldown_until = coin_cooldowns[coin]
+                if get_ist_datetime() < cooldown_until:
+                    logger.info(f"Skip {coin} — in cooldown until {cooldown_until.strftime('%H:%M')}")
+                    continue
+                else:
+                    del coin_cooldowns[coin]
+
             found=detect_patterns(symbol,klines,price,btc_trend)
             if not found: continue
-            best=max(found,key=lambda x:x[1])
-            if best[1]<MIN_PRIMARY_SCORE:                           continue
-            if is_pattern_blacklisted(best[0]):                      continue
-            if is_pattern_suspended(best[0]):                        continue
-            if not is_sentiment_valid(best[2],fng):                  continue
-            if coin in BTC_CORRELATED and too_many_correlated_active(): continue
-            tf_score=get_timeframe_score(symbol,best[2])
-            if tf_score==-1:
-                logger.info(f"Skip {coin} — 4h disagrees"); continue
-            if tf_score<2 and best[1]<96:
-                logger.info(f"Skip {coin} — TF score low ({tf_score})"); continue
-            confirmed=list(dict.fromkeys([x[0] for x in found]))
-            primary=best[0]; extras=[p for p in confirmed if p!=primary]
-            pt=primary+(" + "+" + ".join(extras[:2]) if extras else "")
-            score=min(best[1]+min(len(found)*0.5,2),99)
-            if score>=MIN_SETUP_SCORE:
-                atr=calculate_atr(klines); atr_pct=(atr/price)*100 if price>0 else 0
-                lev=get_smart_leverage(symbol,atr_pct,score)
-                setup={"coin":coin,"symbol":symbol,"direction":best[2],"pattern":pt,
-                       "setup_score":score,"leverage":lev,"scan_price":price,
-                       "market_condition":market_condition,"tf_score":tf_score}
-                if score>=INSTANT_SIGNAL_THRESHOLD:
-                    if (coin not in active_trades and coin not in pending_signals
-                            and len(active_trades)<MAX_ACTIVE_TRADES):
-                        logger.info(f"INSTANT: {coin}|Score:{score}")
-                        format_and_send(setup,coin,is_instant=True,market_condition=market_condition)
-                else:
-                    if (coin not in active_trades and coin not in pending_signals
-                            and len(active_trades)<MAX_ACTIVE_TRADES
-                            and (coin not in hourly_queue or score>hourly_queue[coin]["setup_score"])):
-                        hourly_queue[coin]=setup
-                        logger.info(f"Queued: {coin}|{best[2]}|Score:{score}|TF:{tf_score}")
+
+            # All 15 patterns get performance-adjusted scores — none discarded
+            scored = get_all_pattern_scores(found, market_condition)
+
+            # Try both directions — pick best qualifying for each
+            signal_sent = False
+            for direction in ["BUY","SELL"]:
+                if signal_sent: break
+                dir_pats = [p for p in scored if p[2]==direction]
+                if not dir_pats: continue
+
+                best_pat   = dir_pats[0]
+                primary    = best_pat[0]
+                adj_score  = best_pat[1]
+                base_s     = best_pat[3]
+
+                if base_s < MIN_PRIMARY_SCORE:                         continue
+                if is_pattern_blacklisted(primary):                     continue
+                if is_pattern_suspended(primary):                       continue
+                if not is_sentiment_valid(direction, fng):              continue
+                if btc_crashing and direction=="BUY":
+                    logger.info(f"Skip {coin} BUY — BTC crashing");   continue
+                if coin in BTC_CORRELATED and too_many_correlated_active(): continue
+
+                tf_score = get_timeframe_score(symbol, direction)
+                if tf_score == -1:
+                    logger.info(f"Skip {coin} {direction} — counter-trend"); continue
+
+                # All same-direction patterns shown in label
+                extras = [p[0] for p in dir_pats[1:3]]
+                pt     = primary + (" + "+" + ".join(extras) if extras else "")
+
+                # Confirmation bonus for multiple patterns agreeing
+                confirm_bonus = min(len(dir_pats) * 0.5, 3.0)
+                score         = min(adj_score + confirm_bonus, 99)
+
+                if score < MIN_SETUP_SCORE: continue
+
+                atr    = calculate_atr(klines); atr_pct=(atr/price)*100 if price>0 else 0
+                lev    = get_smart_leverage(symbol, atr_pct, score)
+                setup  = {"coin":coin,"symbol":symbol,"direction":direction,
+                          "pattern":pt,"setup_score":score,"leverage":lev,
+                          "scan_price":price,"market_condition":market_condition,
+                          "tf_score":tf_score}
+
+                if (coin not in active_trades and coin not in pending_signals
+                        and len(active_trades) < MAX_ACTIVE_TRADES):
+                    is_inst = score >= INSTANT_SIGNAL_THRESHOLD
+                    logger.info(f"{'INSTANT' if is_inst else 'SIGNAL'}: {coin}|{direction}|Score:{score:.1f}|{primary}")
+                    if format_and_send(setup,coin,is_instant=is_inst,market_condition=market_condition):
+                        signal_sent = True
+
         except Exception as e: logger.error(f"Scan {coin}: {e}",exc_info=True)
         time.sleep(DELAY_BETWEEN_COINS)
 
