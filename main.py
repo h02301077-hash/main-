@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -1412,50 +1412,129 @@ def poll_telegram():
             for update in res.json().get("result",[]):
                 last_update_id = update["update_id"]
                 if "callback_query" in update:
-                    cb=update["callback_query"]; data=cb["data"]; coin=data.split("_",1)[1]
                     try:
-                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
-                                      json={"callback_query_id":cb["id"],"text":"Processing..."},timeout=15)
-                    except Exception as e: logger.warning(f"callback: {e}")
-                    if "ACTIVATE" in data and coin in pending_signals:
+                        cb   = update["callback_query"]
+                        data = cb.get("data", "")
+                        cbid = cb.get("id", "")
+
+                        # Answer callback immediately so button stops loading
                         try:
-                            sig = pending_signals[coin].copy()
-                            lp  = get_price(sig["symbol"])
-                            if lp: sig["entry"] = lp
-                            sig["breakeven_sent"]   = False
-                            sig["partial_tp_taken"] = False
-                            sig["reversal_alerted"] = False
-                            with trade_lock:
-                                active_trades[coin] = sig
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                                json={"callback_query_id": cbid, "text": "Processing..."},
+                                timeout=10
+                            )
+                        except Exception as e:
+                            logger.warning(f"answerCallback failed: {e}")
+
+                        # Parse action and coin name safely
+                        if "_" not in data:
+                            logger.warning(f"Invalid callback data: {data}")
+                            continue
+                        action = data.split("_", 1)[0]   # ACTIVATE or IGNORE
+                        coin   = data.split("_", 1)[1]   # coin name
+
+                        logger.info(f"Callback received: action={action} coin={coin} pending={list(pending_signals.keys())}")
+
+                        if action == "ACTIVATE":
+                            if coin not in pending_signals:
+                                # Signal expired — inform user
+                                send_telegram(
+                                    f"⚠️ <b>{BOT_HEADER}</b>\n"
+                                    f"Signal for <b>{coin}</b> has expired.\n"
+                                    f"It was not in pending signals.\n"
+                                    f"Wait for next signal."
+                                )
+                                logger.warning(f"ACTIVATE failed — {coin} not in pending_signals")
+                            elif coin in active_trades:
+                                send_telegram(
+                                    f"⚠️ <b>{BOT_HEADER}</b>\n"
+                                    f"<b>{coin}</b> is already an active trade."
+                                )
+                            elif len(active_trades) >= MAX_ACTIVE_TRADES:
+                                send_telegram(
+                                    f"⚠️ <b>{BOT_HEADER}</b>\n"
+                                    f"Max active trades ({MAX_ACTIVE_TRADES}) reached.\n"
+                                    f"Close a trade before activating {coin}."
+                                )
+                            else:
+                                try:
+                                    # Build clean trade dict
+                                    sig = {}
+                                    for k, v in pending_signals[coin].items():
+                                        sig[k] = v
+
+                                    # Get fresh live price
+                                    live_price = get_price(sig.get("symbol", coin + "USDT"))
+                                    if live_price and live_price > 0:
+                                        sig["entry"] = live_price
+                                    elif not sig.get("entry"):
+                                        sig["entry"] = sig.get("scan_price", 0)
+
+                                    # Reset trade tracking flags
+                                    sig["breakeven_sent"]   = False
+                                    sig["partial_tp_taken"] = False
+                                    sig["reversal_alerted"] = False
+                                    sig["timestamp"]        = get_ist_datetime()
+                                    sig["expires_at"]       = None
+
+                                    # Add to active trades
+                                    with trade_lock:
+                                        active_trades[coin] = sig
+
+                                    # Remove from pending
+                                    if coin in pending_signals:
+                                        del pending_signals[coin]
+
+                                    # Save to disk
+                                    save_active_trades()
+
+                                    # Build confirmation message
+                                    entry_p = sig.get("entry", 0)
+                                    sl_p    = sig.get("sl", 0)
+                                    tp_p    = sig.get("tp", 0)
+                                    lev     = sig.get("leverage", 5)
+                                    dirn    = sig.get("direction", "?")
+                                    pat     = sig.get("pattern", "?")
+                                    sl_pct  = abs(entry_p - sl_p) / entry_p * 100 if entry_p > 0 else 0
+                                    tp_pct  = abs(tp_p - entry_p) / entry_p * 100 if entry_p > 0 else 0
+                                    rr      = tp_pct / sl_pct if sl_pct > 0 else 0
+
+                                    send_telegram(
+                                        f"🚀 <b>{BOT_HEADER}</b>\n"
+                                        f"{S('═')}\n"
+                                        f"✅ <b>{coin}</b> TRADE ACTIVATED\n\n"
+                                        f"📢 {dirn} | Leverage: <b>{lev}x</b>\n"
+                                        f"💰 Entry: <code>{format_price(entry_p)}</code>\n"
+                                        f"🎯 TP:    <code>{format_price(tp_p)}</code>  (+{tp_pct:.2f}%)\n"
+                                        f"🛑 SL:    <code>{format_price(sl_p)}</code>  (-{sl_pct:.2f}%)\n"
+                                        f"📊 RR:   1:{rr:.1f}\n\n"
+                                        f"📌 Pattern: {pat}\n"
+                                        f"🕐 Time: {get_ist_time()}\n"
+                                        f"{S('═')}\n"
+                                        f"✏️ Set your trade on CoinDCX now!"
+                                    )
+                                    logger.info(f"ACTIVATED: {coin}|{dirn}|Entry:{entry_p}|Lev:{lev}x|RR:1:{rr:.1f}")
+
+                                except Exception as e:
+                                    logger.error(f"Activate error {coin}: {e}", exc_info=True)
+                                    send_telegram(
+                                        f"❌ <b>{BOT_HEADER}</b>\n"
+                                        f"Error activating {coin}.\n"
+                                        f"Details: {str(e)[:100]}"
+                                    )
+
+                        elif action == "IGNORE":
                             if coin in pending_signals:
                                 del pending_signals[coin]
-                            save_active_trades()
-                            entry_price = sig["entry"]
-                            sl_price    = sig["sl"]
-                            tp_price    = sig["tp"]
-                            lev         = sig.get("leverage", 5)
-                            direction   = sig.get("direction","?")
-                            sl_pct      = abs(entry_price - sl_price) / entry_price * 100
-                            tp_pct      = abs(tp_price - entry_price) / entry_price * 100
                             send_telegram(
-                                f"🚀 <b>{BOT_HEADER}</b>\n"
-                                f"{S('═')}\n"
-                                f"✅ <b>{coin}</b> Trade ACTIVATED\n\n"
-                                f"📢 Direction: <b>{direction}</b> | Leverage: <b>{lev}x</b>\n"
-                                f"💰 Entry:  <code>{format_price(entry_price)}</code>\n"
-                                f"🎯 TP:     <code>{format_price(tp_price)}</code>  (+{tp_pct:.2f}%)\n"
-                                f"🛑 SL:     <code>{format_price(sl_price)}</code>  (-{sl_pct:.2f}%)\n\n"
-                                f"📌 Pattern: {sig.get('pattern','?')}\n"
-                                f"🕐 Activated: {get_ist_time()}\n"
-                                f"{S('═')}"
+                                f"❌ <b>{BOT_HEADER}</b>\n"
+                                f"Signal ignored: <b>{coin}</b>"
                             )
-                            logger.info(f"ACTIVATED: {coin}|{direction}|Entry:{entry_price}|Lev:{lev}x")
-                        except Exception as e:
-                            logger.error(f"Activate error {coin}: {e}")
-                            send_telegram(f"❌ <b>{BOT_HEADER}</b>\nError activating {coin}: {e}")
-                    elif "IGNORE" in data and coin in pending_signals:
-                        send_telegram(f"❌ <b>{BOT_HEADER}</b>\n{coin} signal ignored.")
-                        del pending_signals[coin]
+                            logger.info(f"IGNORED: {coin}")
+
+                    except Exception as e:
+                        logger.error(f"Callback handler error: {e}", exc_info=True)
                 elif "message" in update:
                     txt = update["message"].get("text","").strip().lower()
                     if   txt=="/stats":   send_telegram(get_pattern_stats_text())
