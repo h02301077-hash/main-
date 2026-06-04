@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -82,10 +82,10 @@ last_weekly_report_day = None
 SCAN_INTERVAL            = 300
 BATCH_INTERVAL           = 1800
 RIVER_INTERVAL           = 900
-MIN_SETUP_SCORE          = 91
+MIN_SETUP_SCORE          = 94
 MIN_PRIMARY_SCORE        = 82
 INSTANT_SIGNAL_THRESHOLD = 97
-MIN_PROFIT_TARGET        = 20.0
+MIN_PROFIT_TARGET        = 15.0
 DELAY_BETWEEN_COINS      = 0.15
 MAX_SIGNALS_PER_BATCH    = 1
 MAX_ACTIVE_TRADES        = 5
@@ -100,7 +100,7 @@ ATR_VOLATILITY_RATIO     = 3.0
 CONSEC_LOSS_SUSPEND      = 5
 MIN_SIGNALS_TO_SUSPEND   = 15
 SUSPEND_HOURS            = 12
-ADX_MIN_TREND             = 18
+ADX_MIN_TREND             = 21
 ST_PERIOD                = 10
 ST_MULTIPLIER            = 3.0
 MIN_SL_PCT               = 0.02
@@ -1141,7 +1141,7 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
     if not live_price: return False
     entry = live_price
 
-    if abs(entry-setup["scan_price"])/setup["scan_price"] > 0.005:
+    if abs(entry-setup["scan_price"])/setup["scan_price"] > 0.01:
         logger.info(f"{coin} rejected — drifted"); return False
 
     klines_15m = get_klines(setup["symbol"],"15m",100)
@@ -1157,8 +1157,14 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
     rsi_ok     = is_rsi_valid(closes, setup["direction"])
     funding_ok = is_funding_favorable(setup["symbol"], setup["direction"])
 
-    if not vol_ok or not rsi_ok or not is_volatility_normal(klines_15m) or not funding_ok:
-        return False
+    if not vol_ok:
+        logger.info(f"{coin} rejected — volume not confirmed"); return False
+    if not rsi_ok:
+        logger.info(f"{coin} rejected — RSI invalid"); return False
+    if not is_volatility_normal(klines_15m):
+        logger.info(f"{coin} rejected — volatility abnormal"); return False
+    if not funding_ok:
+        logger.info(f"{coin} rejected — funding rate unfavorable"); return False
 
     candle_strong = is_candle_strong(klines_15m)
     # Candle strength is informational — weak candles get noted but not blocked
@@ -1196,18 +1202,24 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
     adx_val   = calculate_adx(klines_15m)
 
     tf_score = setup.get("tf_score", get_timeframe_score(setup["symbol"], setup["direction"]))
+    # Always recalculate leverage fresh using 1h ATR for accuracy
     lev      = get_smart_leverage(setup["symbol"], atr_pct, setup["setup_score"])
+    logger.info(f"{coin} leverage calculated: {lev}x | ATR%: {atr_pct:.2f} | Score: {setup['setup_score']:.1f}")
 
     sl = get_structure_sl(klines_15m, setup["direction"], entry, atr_1h)
     tp = entry+atr_1h*ATR_TP_MULTIPLIER if setup["direction"]=="BUY" else entry-atr_1h*ATR_TP_MULTIPLIER
 
     profit_target = (abs(tp-entry)/entry)*100*lev
+    logger.info(f"{coin} profit target: {profit_target:.2f}% | Min: {MIN_PROFIT_TARGET}% | TP: {format_price(tp)} | SL: {format_price(sl)}")
     if profit_target < MIN_PROFIT_TARGET:
         risk = abs(tp-entry)/entry
         if risk > 0:
             needed = int(MIN_PROFIT_TARGET/(risk*100))+1
+            logger.info(f"{coin} adjusting leverage: {lev}x -> {needed}x to meet profit target")
             if needed <= 20: lev=needed; profit_target=(abs(tp-entry)/entry)*100*lev
-            else: return False
+            else:
+                logger.info(f"{coin} rejected — can't meet profit target even at 20x")
+                return False
 
     setup["leverage"] = lev
     price_range    = (max(closes[-10:])-min(closes[-10:]))/10
@@ -1400,25 +1412,47 @@ def poll_telegram():
             for update in res.json().get("result",[]):
                 last_update_id = update["update_id"]
                 if "callback_query" in update:
-                    cb=update["callback_query"]; data=cb["data"]; coin=data.split("_")[1]
+                    cb=update["callback_query"]; data=cb["data"]; coin=data.split("_",1)[1]
                     try:
                         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
                                       json={"callback_query_id":cb["id"],"text":"Processing..."},timeout=15)
                     except Exception as e: logger.warning(f"callback: {e}")
                     if "ACTIVATE" in data and coin in pending_signals:
-                        lp = get_price(pending_signals[coin]["symbol"])
-                        if lp: pending_signals[coin]["entry"] = lp
-                        with trade_lock:
-                            pending_signals[coin]["breakeven_sent"]   = False
-                            pending_signals[coin]["partial_tp_taken"] = False
-                            active_trades[coin] = pending_signals[coin]
-                        save_active_trades()
-                        send_telegram(
-                            f"🚀 <b>{BOT_HEADER}</b>\n{S()}\n"
-                            f"✅ <b>{coin}</b> Trade Activated!\n"
-                            f"💰 Entry: {format_price(pending_signals[coin]['entry'])}\n{S()}"
-                        )
-                        del pending_signals[coin]
+                        try:
+                            sig = pending_signals[coin].copy()
+                            lp  = get_price(sig["symbol"])
+                            if lp: sig["entry"] = lp
+                            sig["breakeven_sent"]   = False
+                            sig["partial_tp_taken"] = False
+                            sig["reversal_alerted"] = False
+                            with trade_lock:
+                                active_trades[coin] = sig
+                            if coin in pending_signals:
+                                del pending_signals[coin]
+                            save_active_trades()
+                            entry_price = sig["entry"]
+                            sl_price    = sig["sl"]
+                            tp_price    = sig["tp"]
+                            lev         = sig.get("leverage", 5)
+                            direction   = sig.get("direction","?")
+                            sl_pct      = abs(entry_price - sl_price) / entry_price * 100
+                            tp_pct      = abs(tp_price - entry_price) / entry_price * 100
+                            send_telegram(
+                                f"🚀 <b>{BOT_HEADER}</b>\n"
+                                f"{S('═')}\n"
+                                f"✅ <b>{coin}</b> Trade ACTIVATED\n\n"
+                                f"📢 Direction: <b>{direction}</b> | Leverage: <b>{lev}x</b>\n"
+                                f"💰 Entry:  <code>{format_price(entry_price)}</code>\n"
+                                f"🎯 TP:     <code>{format_price(tp_price)}</code>  (+{tp_pct:.2f}%)\n"
+                                f"🛑 SL:     <code>{format_price(sl_price)}</code>  (-{sl_pct:.2f}%)\n\n"
+                                f"📌 Pattern: {sig.get('pattern','?')}\n"
+                                f"🕐 Activated: {get_ist_time()}\n"
+                                f"{S('═')}"
+                            )
+                            logger.info(f"ACTIVATED: {coin}|{direction}|Entry:{entry_price}|Lev:{lev}x")
+                        except Exception as e:
+                            logger.error(f"Activate error {coin}: {e}")
+                            send_telegram(f"❌ <b>{BOT_HEADER}</b>\nError activating {coin}: {e}")
                     elif "IGNORE" in data and coin in pending_signals:
                         send_telegram(f"❌ <b>{BOT_HEADER}</b>\n{coin} signal ignored.")
                         del pending_signals[coin]
