@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -1505,6 +1505,344 @@ def check_active_trades():
             logger.info(f"Closed: {coin}|{hit}|{pnl:.2f}%")
 
 
+
+# ================= TREND ANALYSIS =================
+def get_trend_label(ema20, ema50, price, interval_name):
+    """Returns trend direction with strength for a given timeframe."""
+    if not ema20 or not ema50:
+        return "➖ Neutral"
+    diff_pct = ((ema20 - ema50) / ema50) * 100
+    if price > ema20 > ema50:
+        if diff_pct > 3:   return "🟢 Strong Uptrend"
+        elif diff_pct > 1: return "🟢 Uptrend"
+        else:              return "🟡 Weak Uptrend"
+    elif price < ema20 < ema50:
+        if diff_pct < -3:  return "🔴 Strong Downtrend"
+        elif diff_pct < -1:return "🔴 Downtrend"
+        else:              return "🟡 Weak Downtrend"
+    elif price > ema50:    return "🟡 Above EMA50 — Ranging"
+    else:                  return "🟡 Below EMA50 — Ranging"
+
+def get_key_levels(klines):
+    """Returns nearest support and resistance levels."""
+    highs  = [float(k[2]) for k in klines]
+    lows   = [float(k[3]) for k in klines]
+    closes = [float(k[4]) for k in klines]
+    price  = closes[-1]
+
+    # Simple pivot-based support and resistance
+    pivot      = (highs[-2] + lows[-2] + closes[-2]) / 3
+    resistance = 2 * pivot - lows[-2]
+    support    = 2 * pivot - highs[-2]
+
+    # Also check recent swing highs and lows
+    recent_high = max(highs[-20:])
+    recent_low  = min(lows[-20:])
+
+    levels_above = sorted([r for r in [resistance, recent_high] if r > price])
+    levels_below = sorted([s for s in [support, recent_low] if s < price], reverse=True)
+
+    r1 = levels_above[0] if levels_above else resistance
+    s1 = levels_below[0] if levels_below else support
+
+    return s1, r1
+
+def cmd_trend(symbol_input: str) -> str:
+    """
+    /trend BTC — shows trend across D1, 8h, 4h, 1h, 15m
+    Also shows RSI, key levels, and overall bias.
+    """
+    coin   = symbol_input.upper().replace("USDT","").strip()
+    symbol = coin + "USDT"
+    price  = get_price(symbol)
+    if not price:
+        return f"❌ Could not get price for {coin}. Check the symbol."
+
+    timeframes = [
+        ("1d",  "Day    "),
+        ("8h",  "8 Hour "),
+        ("4h",  "4 Hour "),
+        ("1h",  "1 Hour "),
+        ("15m", "15 Min "),
+    ]
+
+    results   = []
+    bull_count = 0
+    bear_count = 0
+
+    for tf, label in timeframes:
+        klines = get_klines(symbol, tf, 60)
+        if not klines or len(klines) < 50:
+            results.append((label, "➖ No data", 50.0, 0, 0))
+            continue
+        closes = [float(k[4]) for k in klines]
+        ema20  = calculate_ema(closes, 20)
+        ema50  = calculate_ema(closes, 50)
+        rsi    = calculate_rsi(closes)
+        adx    = calculate_adx(klines)
+        trend  = get_trend_label(ema20, ema50, price, label)
+        if "Uptrend" in trend:   bull_count += 1
+        if "Downtrend" in trend: bear_count += 1
+        results.append((label, trend, rsi, adx, closes[-1]))
+
+    # Key levels from 4h
+    klines_4h = get_klines(symbol, "4h", 30)
+    s1 = r1 = 0
+    if klines_4h and len(klines_4h) >= 5:
+        s1, r1 = get_key_levels(klines_4h)
+
+    # Overall bias
+    if bull_count >= 4:   bias = "🟢 STRONGLY BULLISH"
+    elif bull_count >= 3: bias = "🟢 BULLISH"
+    elif bear_count >= 4: bias = "🔴 STRONGLY BEARISH"
+    elif bear_count >= 3: bias = "🔴 BEARISH"
+    else:                 bias = "🟡 MIXED / SIDEWAYS"
+
+    msg  = "<pre>"
+    msg += f"{'📊 TREND ANALYSIS':^34}\n"
+    msg += f"  {coin} — {format_price(price)}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {'TF':<10} {'TREND':<22}\n"
+    msg += f"{'─'*34}\n"
+    for label, trend, rsi, adx, _ in results:
+        msg += f"  {label} {trend}\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  Overall Bias: {bias}\n"
+    msg += f"{'─'*34}\n"
+    if s1 and r1:
+        msg += f"  🔵 Support:    {format_price(s1)}\n"
+        msg += f"  🔴 Resistance: {format_price(r1)}\n"
+        msg += f"{'─'*34}\n"
+    # RSI from 1h
+    rsi_1h = results[3][2] if len(results) > 3 else 50
+    adx_1h = results[3][3] if len(results) > 3 else 0
+    rsi_lbl = "Overbought ⚠️" if rsi_1h > 70 else "Oversold ⚠️" if rsi_1h < 30 else "Normal ✅"
+    msg += f"  RSI (1h): {rsi_1h:.1f} {rsi_lbl}\n"
+    msg += f"  ADX (1h): {adx_1h:.1f} {'Strong' if adx_1h > 25 else 'Weak'} trend\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
+# ================= MARKET OVERVIEW =================
+def cmd_market() -> str:
+    """
+    /market — overall crypto market health
+    BTC trend, top gainers, top losers from your coin list
+    """
+    # BTC and ETH snapshot
+    btc = get_price("BTCUSDT")
+    eth = get_price("ETHUSDT")
+    sol = get_price("SOLUSDT")
+
+    btc_klines = get_klines("BTCUSDT", "1h", 50)
+    btc_trend  = "N/A"
+    if btc_klines and len(btc_klines) >= 50:
+        closes = [float(k[4]) for k in btc_klines]
+        e20    = calculate_ema(closes, 20)
+        e50    = calculate_ema(closes, 50)
+        btc_trend = get_trend_label(e20, e50, btc, "1h") if btc else "N/A"
+
+    # Scan top 20 coins for 24h change
+    scan_coins_list = ["BTC","ETH","BNB","SOL","XRP","ADA","AVAX","DOT","LINK","NEAR",
+                       "INJ","SUI","APT","ARB","OP","ATOM","PEPE","WIF","BONK","DOGE"]
+    gainers = []
+    losers  = []
+
+    for coin in scan_coins_list:
+        try:
+            klines = get_klines(coin+"USDT", "1d", 3)
+            if klines and len(klines) >= 2:
+                prev  = float(klines[-2][4])
+                curr  = float(klines[-1][4])
+                chg   = ((curr - prev) / prev) * 100 if prev > 0 else 0
+                if chg > 0: gainers.append((coin, chg))
+                else:       losers.append((coin, chg))
+        except Exception:
+            continue
+
+    gainers.sort(key=lambda x: x[1], reverse=True)
+    losers.sort(key=lambda x: x[1])
+
+    fng = get_fear_greed_index()
+    fng_em = "😨" if fng <= 25 else "😟" if fng <= 45 else "😐" if fng <= 55 else "😊" if fng <= 75 else "🤑"
+
+    msg  = "<pre>"
+    msg += f"{'🌍 MARKET OVERVIEW':^34}\n"
+    msg += f"{'⚙️ TSM v32G':^34}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {fng_em} Fear & Greed: {fng}\n"
+    msg += f"{'─'*34}\n"
+    if btc: msg += f"  ₿  BTC  {format_price(btc):>14}\n"
+    if eth: msg += f"  Ξ  ETH  {format_price(eth):>14}\n"
+    if sol: msg += f"  ◎  SOL  {format_price(sol):>14}\n"
+    msg += f"  BTC Trend: {btc_trend}\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  🚀 TOP GAINERS (24h)\n"
+    for coin, chg in gainers[:5]:
+        msg += f"  {coin:<8} +{chg:.2f}%\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  📉 TOP LOSERS (24h)\n"
+    for coin, chg in losers[:5]:
+        msg += f"  {coin:<8} {chg:.2f}%\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
+# ================= COMPARE COINS =================
+def cmd_compare(coins_str: str) -> str:
+    """
+    /compare BTC ETH SOL — compare up to 4 coins side by side
+    Shows 4h trend, RSI, ADX, score potential
+    """
+    coins = [c.upper().replace("USDT","") for c in coins_str.split()[:4]]
+    if not coins:
+        return "Usage: /compare BTC ETH SOL"
+
+    msg  = "<pre>"
+    msg += f"{'📊 COIN COMPARISON':^34}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {'COIN':<8} {'PRICE':>10} {'4H':>6} {'RSI':>5} {'ADX':>5}\n"
+    msg += f"{'─'*34}\n"
+
+    for coin in coins:
+        symbol = coin + "USDT"
+        price  = get_price(symbol)
+        if not price:
+            msg += f"  {coin:<8} Not found\n"
+            continue
+        klines_4h = get_klines(symbol, "4h", 60)
+        trend_lbl = "N/A"
+        rsi_val   = 50.0
+        adx_val   = 0.0
+        if klines_4h and len(klines_4h) >= 50:
+            closes    = [float(k[4]) for k in klines_4h]
+            e20       = calculate_ema(closes, 20)
+            e50       = calculate_ema(closes, 50)
+            rsi_val   = calculate_rsi(closes)
+            adx_val   = calculate_adx(klines_4h)
+            t         = get_trend_label(e20, e50, price, "4h")
+            if "Strong Up"  in t: trend_lbl = "⬆⬆"
+            elif "Uptrend"  in t: trend_lbl = "⬆"
+            elif "Strong Dn"in t: trend_lbl = "⬇⬇"
+            elif "Downtrend"in t: trend_lbl = "⬇"
+            else:                  trend_lbl = "↔"
+        msg += f"  {coin:<8} {format_price(price):>10} {trend_lbl:>6} {rsi_val:>5.1f} {adx_val:>5.1f}\n"
+
+    msg += f"{'─'*34}\n"
+    msg += f"  Legend: ⬆⬆ Strong Bull  ⬇⬇ Strong Bear\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
+# ================= JOURNAL =================
+def cmd_journal() -> str:
+    """Last 10 closed trades in a clean table."""
+    if not trade_journal:
+        return f"<b>{BOT_HEADER}</b>\nNo trades recorded yet."
+
+    recent = trade_journal[-10:][::-1]  # newest first
+    msg  = "<pre>"
+    msg += f"{'📋 TRADE JOURNAL':^34}\n"
+    msg += f"{'⚙️ TSM v32G':^34}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {'COIN':<6} {'DIR':<5} {'RES':<5} {'PNL':>7} {'DUR':>8}\n"
+    msg += f"{'─'*34}\n"
+
+    for t in recent:
+        coin = t.get("coin","?")[:6]
+        dirn = t.get("direction","?")[:4]
+        res  = "WIN" if t.get("result")=="WIN" else "LOSS"
+        pnl  = t.get("pnl", 0)
+        dur  = t.get("duration","?")[:8]
+        em   = "✅" if res=="WIN" else "🔴"
+        msg += f"  {em}{coin:<5} {dirn:<5} {res:<5} {pnl:>+6.1f}% {dur:>8}\n"
+
+    total  = len(trade_journal)
+    wins   = sum(1 for t in trade_journal if t.get("result")=="WIN")
+    wr     = (wins/total*100) if total > 0 else 0
+    pnl_t  = sum(t.get("pnl",0) for t in trade_journal)
+
+    msg += f"{'─'*34}\n"
+    msg += f"  Total: {total} | WR: {wr:.1f}% | PnL: {pnl_t:+.1f}%\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
+# ================= MANUAL SCAN =================
+def cmd_scan(btc_trend: int, fng: int, market_condition: str) -> str:
+    """
+    /scan — manually trigger analysis and show top 5 coins right now
+    """
+    send_telegram(f"🔄 <b>{BOT_HEADER}</b> Scanning {len(COINS)} coins... please wait.")
+
+    results = []
+    scan_list = COINS[:30]  # scan top 30 for speed
+
+    for coin in scan_list:
+        try:
+            symbol = coin + "USDT"
+            price  = get_price(symbol)
+            klines = get_klines(symbol, "15m", 100)
+            if not price or not klines: continue
+
+            found = detect_patterns(symbol, klines, price, btc_trend)
+            if not found: continue
+
+            scored = get_all_pattern_scores(found, market_condition)
+            if not scored: continue
+
+            best      = scored[0]
+            adj_score = best[1] + min(len(scored)*0.5, 3)
+            adj_score = min(adj_score, 99)
+
+            klines_4h = get_klines(symbol, "4h", 60)
+            tf_score  = get_timeframe_score(symbol, best[2])
+            if tf_score == -1: continue
+
+            results.append({
+                "coin":      coin,
+                "direction": best[2],
+                "score":     adj_score,
+                "pattern":   best[0],
+                "tf_score":  tf_score,
+                "price":     price,
+            })
+        except Exception:
+            continue
+        time.sleep(0.1)
+
+    if not results:
+        return f"<b>{BOT_HEADER}</b>\nNo qualifying setups found right now.\nMarket may be in consolidation."
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    top = results[:5]
+
+    msg  = "<pre>"
+    msg += f"{'🔍 MANUAL SCAN RESULTS':^34}\n"
+    msg += f"{'⚙️ TSM v32G':^34}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {'COIN':<7} {'DIR':<5} {'SCORE':>6} {'TF':>4}\n"
+    msg += f"{'─'*34}\n"
+
+    for r in top:
+        dir_em  = "🟢" if r["direction"]=="BUY" else "🔴"
+        tf_star = "⭐" if r["tf_score"]==3 else "✅" if r["tf_score"]==2 else "⚠️"
+        msg += f"  {dir_em}{r['coin']:<6} {r['direction']:<5} {r['score']:>5.1f} {tf_star}\n"
+        msg += f"  └ {r['pattern'][:28]}\n"
+
+    msg += f"{'─'*34}\n"
+    msg += f"  Market: {market_condition.upper()}  F&G: {fng}\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
 # ================= HELP & PATTERNS TEXT =================
 def get_help_text() -> str:
     return (
@@ -1528,6 +1866,11 @@ def get_help_text() -> str:
         f"  /learn        Bot insights\n"
         f"  /patterns     All 15 patterns\n"
         f"  /backtest BTC Backtest coin\n"
+        f"  /trend BTC    Trend analysis\n"
+        f"  /market       Market overview\n"
+        f"  /compare BTC ETH SOL\n"
+        f"  /scan         Manual coin scan\n"
+        f"  /journal      Last 10 trades\n"
         f"{'─'*34}\n"
         f"  🔔 ALERTS\n"
         f"{'─'*34}\n"
@@ -1562,6 +1905,344 @@ def get_patterns_ranked_text() -> str:
 
 # ================= TELEGRAM POLLING =================
 
+
+# ================= TREND ANALYSIS =================
+def get_trend_label(ema20, ema50, price, interval_name):
+    """Returns trend direction with strength for a given timeframe."""
+    if not ema20 or not ema50:
+        return "➖ Neutral"
+    diff_pct = ((ema20 - ema50) / ema50) * 100
+    if price > ema20 > ema50:
+        if diff_pct > 3:   return "🟢 Strong Uptrend"
+        elif diff_pct > 1: return "🟢 Uptrend"
+        else:              return "🟡 Weak Uptrend"
+    elif price < ema20 < ema50:
+        if diff_pct < -3:  return "🔴 Strong Downtrend"
+        elif diff_pct < -1:return "🔴 Downtrend"
+        else:              return "🟡 Weak Downtrend"
+    elif price > ema50:    return "🟡 Above EMA50 — Ranging"
+    else:                  return "🟡 Below EMA50 — Ranging"
+
+def get_key_levels(klines):
+    """Returns nearest support and resistance levels."""
+    highs  = [float(k[2]) for k in klines]
+    lows   = [float(k[3]) for k in klines]
+    closes = [float(k[4]) for k in klines]
+    price  = closes[-1]
+
+    # Simple pivot-based support and resistance
+    pivot      = (highs[-2] + lows[-2] + closes[-2]) / 3
+    resistance = 2 * pivot - lows[-2]
+    support    = 2 * pivot - highs[-2]
+
+    # Also check recent swing highs and lows
+    recent_high = max(highs[-20:])
+    recent_low  = min(lows[-20:])
+
+    levels_above = sorted([r for r in [resistance, recent_high] if r > price])
+    levels_below = sorted([s for s in [support, recent_low] if s < price], reverse=True)
+
+    r1 = levels_above[0] if levels_above else resistance
+    s1 = levels_below[0] if levels_below else support
+
+    return s1, r1
+
+def cmd_trend(symbol_input: str) -> str:
+    """
+    /trend BTC — shows trend across D1, 8h, 4h, 1h, 15m
+    Also shows RSI, key levels, and overall bias.
+    """
+    coin   = symbol_input.upper().replace("USDT","").strip()
+    symbol = coin + "USDT"
+    price  = get_price(symbol)
+    if not price:
+        return f"❌ Could not get price for {coin}. Check the symbol."
+
+    timeframes = [
+        ("1d",  "Day    "),
+        ("8h",  "8 Hour "),
+        ("4h",  "4 Hour "),
+        ("1h",  "1 Hour "),
+        ("15m", "15 Min "),
+    ]
+
+    results   = []
+    bull_count = 0
+    bear_count = 0
+
+    for tf, label in timeframes:
+        klines = get_klines(symbol, tf, 60)
+        if not klines or len(klines) < 50:
+            results.append((label, "➖ No data", 50.0, 0, 0))
+            continue
+        closes = [float(k[4]) for k in klines]
+        ema20  = calculate_ema(closes, 20)
+        ema50  = calculate_ema(closes, 50)
+        rsi    = calculate_rsi(closes)
+        adx    = calculate_adx(klines)
+        trend  = get_trend_label(ema20, ema50, price, label)
+        if "Uptrend" in trend:   bull_count += 1
+        if "Downtrend" in trend: bear_count += 1
+        results.append((label, trend, rsi, adx, closes[-1]))
+
+    # Key levels from 4h
+    klines_4h = get_klines(symbol, "4h", 30)
+    s1 = r1 = 0
+    if klines_4h and len(klines_4h) >= 5:
+        s1, r1 = get_key_levels(klines_4h)
+
+    # Overall bias
+    if bull_count >= 4:   bias = "🟢 STRONGLY BULLISH"
+    elif bull_count >= 3: bias = "🟢 BULLISH"
+    elif bear_count >= 4: bias = "🔴 STRONGLY BEARISH"
+    elif bear_count >= 3: bias = "🔴 BEARISH"
+    else:                 bias = "🟡 MIXED / SIDEWAYS"
+
+    msg  = "<pre>"
+    msg += f"{'📊 TREND ANALYSIS':^34}\n"
+    msg += f"  {coin} — {format_price(price)}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {'TF':<10} {'TREND':<22}\n"
+    msg += f"{'─'*34}\n"
+    for label, trend, rsi, adx, _ in results:
+        msg += f"  {label} {trend}\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  Overall Bias: {bias}\n"
+    msg += f"{'─'*34}\n"
+    if s1 and r1:
+        msg += f"  🔵 Support:    {format_price(s1)}\n"
+        msg += f"  🔴 Resistance: {format_price(r1)}\n"
+        msg += f"{'─'*34}\n"
+    # RSI from 1h
+    rsi_1h = results[3][2] if len(results) > 3 else 50
+    adx_1h = results[3][3] if len(results) > 3 else 0
+    rsi_lbl = "Overbought ⚠️" if rsi_1h > 70 else "Oversold ⚠️" if rsi_1h < 30 else "Normal ✅"
+    msg += f"  RSI (1h): {rsi_1h:.1f} {rsi_lbl}\n"
+    msg += f"  ADX (1h): {adx_1h:.1f} {'Strong' if adx_1h > 25 else 'Weak'} trend\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
+# ================= MARKET OVERVIEW =================
+def cmd_market() -> str:
+    """
+    /market — overall crypto market health
+    BTC trend, top gainers, top losers from your coin list
+    """
+    # BTC and ETH snapshot
+    btc = get_price("BTCUSDT")
+    eth = get_price("ETHUSDT")
+    sol = get_price("SOLUSDT")
+
+    btc_klines = get_klines("BTCUSDT", "1h", 50)
+    btc_trend  = "N/A"
+    if btc_klines and len(btc_klines) >= 50:
+        closes = [float(k[4]) for k in btc_klines]
+        e20    = calculate_ema(closes, 20)
+        e50    = calculate_ema(closes, 50)
+        btc_trend = get_trend_label(e20, e50, btc, "1h") if btc else "N/A"
+
+    # Scan top 20 coins for 24h change
+    scan_coins_list = ["BTC","ETH","BNB","SOL","XRP","ADA","AVAX","DOT","LINK","NEAR",
+                       "INJ","SUI","APT","ARB","OP","ATOM","PEPE","WIF","BONK","DOGE"]
+    gainers = []
+    losers  = []
+
+    for coin in scan_coins_list:
+        try:
+            klines = get_klines(coin+"USDT", "1d", 3)
+            if klines and len(klines) >= 2:
+                prev  = float(klines[-2][4])
+                curr  = float(klines[-1][4])
+                chg   = ((curr - prev) / prev) * 100 if prev > 0 else 0
+                if chg > 0: gainers.append((coin, chg))
+                else:       losers.append((coin, chg))
+        except Exception:
+            continue
+
+    gainers.sort(key=lambda x: x[1], reverse=True)
+    losers.sort(key=lambda x: x[1])
+
+    fng = get_fear_greed_index()
+    fng_em = "😨" if fng <= 25 else "😟" if fng <= 45 else "😐" if fng <= 55 else "😊" if fng <= 75 else "🤑"
+
+    msg  = "<pre>"
+    msg += f"{'🌍 MARKET OVERVIEW':^34}\n"
+    msg += f"{'⚙️ TSM v32G':^34}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {fng_em} Fear & Greed: {fng}\n"
+    msg += f"{'─'*34}\n"
+    if btc: msg += f"  ₿  BTC  {format_price(btc):>14}\n"
+    if eth: msg += f"  Ξ  ETH  {format_price(eth):>14}\n"
+    if sol: msg += f"  ◎  SOL  {format_price(sol):>14}\n"
+    msg += f"  BTC Trend: {btc_trend}\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  🚀 TOP GAINERS (24h)\n"
+    for coin, chg in gainers[:5]:
+        msg += f"  {coin:<8} +{chg:.2f}%\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  📉 TOP LOSERS (24h)\n"
+    for coin, chg in losers[:5]:
+        msg += f"  {coin:<8} {chg:.2f}%\n"
+    msg += f"{'─'*34}\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
+# ================= COMPARE COINS =================
+def cmd_compare(coins_str: str) -> str:
+    """
+    /compare BTC ETH SOL — compare up to 4 coins side by side
+    Shows 4h trend, RSI, ADX, score potential
+    """
+    coins = [c.upper().replace("USDT","") for c in coins_str.split()[:4]]
+    if not coins:
+        return "Usage: /compare BTC ETH SOL"
+
+    msg  = "<pre>"
+    msg += f"{'📊 COIN COMPARISON':^34}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {'COIN':<8} {'PRICE':>10} {'4H':>6} {'RSI':>5} {'ADX':>5}\n"
+    msg += f"{'─'*34}\n"
+
+    for coin in coins:
+        symbol = coin + "USDT"
+        price  = get_price(symbol)
+        if not price:
+            msg += f"  {coin:<8} Not found\n"
+            continue
+        klines_4h = get_klines(symbol, "4h", 60)
+        trend_lbl = "N/A"
+        rsi_val   = 50.0
+        adx_val   = 0.0
+        if klines_4h and len(klines_4h) >= 50:
+            closes    = [float(k[4]) for k in klines_4h]
+            e20       = calculate_ema(closes, 20)
+            e50       = calculate_ema(closes, 50)
+            rsi_val   = calculate_rsi(closes)
+            adx_val   = calculate_adx(klines_4h)
+            t         = get_trend_label(e20, e50, price, "4h")
+            if "Strong Up"  in t: trend_lbl = "⬆⬆"
+            elif "Uptrend"  in t: trend_lbl = "⬆"
+            elif "Strong Dn"in t: trend_lbl = "⬇⬇"
+            elif "Downtrend"in t: trend_lbl = "⬇"
+            else:                  trend_lbl = "↔"
+        msg += f"  {coin:<8} {format_price(price):>10} {trend_lbl:>6} {rsi_val:>5.1f} {adx_val:>5.1f}\n"
+
+    msg += f"{'─'*34}\n"
+    msg += f"  Legend: ⬆⬆ Strong Bull  ⬇⬇ Strong Bear\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
+# ================= JOURNAL =================
+def cmd_journal() -> str:
+    """Last 10 closed trades in a clean table."""
+    if not trade_journal:
+        return f"<b>{BOT_HEADER}</b>\nNo trades recorded yet."
+
+    recent = trade_journal[-10:][::-1]  # newest first
+    msg  = "<pre>"
+    msg += f"{'📋 TRADE JOURNAL':^34}\n"
+    msg += f"{'⚙️ TSM v32G':^34}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {'COIN':<6} {'DIR':<5} {'RES':<5} {'PNL':>7} {'DUR':>8}\n"
+    msg += f"{'─'*34}\n"
+
+    for t in recent:
+        coin = t.get("coin","?")[:6]
+        dirn = t.get("direction","?")[:4]
+        res  = "WIN" if t.get("result")=="WIN" else "LOSS"
+        pnl  = t.get("pnl", 0)
+        dur  = t.get("duration","?")[:8]
+        em   = "✅" if res=="WIN" else "🔴"
+        msg += f"  {em}{coin:<5} {dirn:<5} {res:<5} {pnl:>+6.1f}% {dur:>8}\n"
+
+    total  = len(trade_journal)
+    wins   = sum(1 for t in trade_journal if t.get("result")=="WIN")
+    wr     = (wins/total*100) if total > 0 else 0
+    pnl_t  = sum(t.get("pnl",0) for t in trade_journal)
+
+    msg += f"{'─'*34}\n"
+    msg += f"  Total: {total} | WR: {wr:.1f}% | PnL: {pnl_t:+.1f}%\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
+# ================= MANUAL SCAN =================
+def cmd_scan(btc_trend: int, fng: int, market_condition: str) -> str:
+    """
+    /scan — manually trigger analysis and show top 5 coins right now
+    """
+    send_telegram(f"🔄 <b>{BOT_HEADER}</b> Scanning {len(COINS)} coins... please wait.")
+
+    results = []
+    scan_list = COINS[:30]  # scan top 30 for speed
+
+    for coin in scan_list:
+        try:
+            symbol = coin + "USDT"
+            price  = get_price(symbol)
+            klines = get_klines(symbol, "15m", 100)
+            if not price or not klines: continue
+
+            found = detect_patterns(symbol, klines, price, btc_trend)
+            if not found: continue
+
+            scored = get_all_pattern_scores(found, market_condition)
+            if not scored: continue
+
+            best      = scored[0]
+            adj_score = best[1] + min(len(scored)*0.5, 3)
+            adj_score = min(adj_score, 99)
+
+            klines_4h = get_klines(symbol, "4h", 60)
+            tf_score  = get_timeframe_score(symbol, best[2])
+            if tf_score == -1: continue
+
+            results.append({
+                "coin":      coin,
+                "direction": best[2],
+                "score":     adj_score,
+                "pattern":   best[0],
+                "tf_score":  tf_score,
+                "price":     price,
+            })
+        except Exception:
+            continue
+        time.sleep(0.1)
+
+    if not results:
+        return f"<b>{BOT_HEADER}</b>\nNo qualifying setups found right now.\nMarket may be in consolidation."
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    top = results[:5]
+
+    msg  = "<pre>"
+    msg += f"{'🔍 MANUAL SCAN RESULTS':^34}\n"
+    msg += f"{'⚙️ TSM v32G':^34}\n"
+    msg += f"{'═'*34}\n"
+    msg += f"  {'COIN':<7} {'DIR':<5} {'SCORE':>6} {'TF':>4}\n"
+    msg += f"{'─'*34}\n"
+
+    for r in top:
+        dir_em  = "🟢" if r["direction"]=="BUY" else "🔴"
+        tf_star = "⭐" if r["tf_score"]==3 else "✅" if r["tf_score"]==2 else "⚠️"
+        msg += f"  {dir_em}{r['coin']:<6} {r['direction']:<5} {r['score']:>5.1f} {tf_star}\n"
+        msg += f"  └ {r['pattern'][:28]}\n"
+
+    msg += f"{'─'*34}\n"
+    msg += f"  Market: {market_condition.upper()}  F&G: {fng}\n"
+    msg += f"  🕐 {get_ist_time()}\n"
+    msg += f"{'═'*34}"
+    msg += "</pre>"
+    return msg
+
 # ================= HELP & PATTERNS TEXT =================
 def get_help_text() -> str:
     return (
@@ -1585,6 +2266,11 @@ def get_help_text() -> str:
         f"  /learn        Bot insights\n"
         f"  /patterns     All 15 patterns\n"
         f"  /backtest BTC Backtest coin\n"
+        f"  /trend BTC    Trend analysis\n"
+        f"  /market       Market overview\n"
+        f"  /compare BTC ETH SOL\n"
+        f"  /scan         Manual coin scan\n"
+        f"  /journal      Last 10 trades\n"
         f"{'─'*34}\n"
         f"  🔔 ALERTS\n"
         f"{'─'*34}\n"
@@ -1775,6 +2461,24 @@ def poll_telegram():
                     elif txt == "/best":     send_telegram(get_best_text())
                     elif txt == "/risk":     send_telegram(get_risk_text())
                     elif txt == "/learn":    send_telegram(get_learning_text())
+                    elif txt == "/journal":  send_telegram(cmd_journal())
+                    elif txt == "/market":   send_telegram(cmd_market())
+                    elif txt.startswith("/trend"):
+                        parts = txt.split()
+                        coin  = parts[1].upper() if len(parts) > 1 else "BTC"
+                        send_telegram(cmd_trend(coin))
+                    elif txt.startswith("/compare"):
+                        parts     = txt.split(maxsplit=1)
+                        coins_str = parts[1].upper() if len(parts) > 1 else "BTC ETH SOL"
+                        send_telegram(cmd_compare(coins_str))
+                    elif txt == "/scan":
+                        btc_p  = get_price("BTCUSDT")
+                        btc_k  = get_klines("BTCUSDT","1h",50)
+                        bt_e50 = calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
+                        bt     = 1 if (btc_p and bt_e50 and btc_p > bt_e50) else -1
+                        fng2   = get_fear_greed_index()
+                        mc2    = detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "sideways"
+                        send_telegram(cmd_scan(bt, fng2, mc2))
                     elif txt == "/patterns": send_telegram(get_patterns_ranked_text())
                     elif txt == "/cb":
                         if check_circuit_breaker():
