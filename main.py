@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -112,12 +112,12 @@ LEV_TIER_2               = ["BNB","SOL","XRP","ADA","AVAX","DOT","LINK","LTC"]
 LEV_TIER_3               = ["DOGE","SHIB","PEPE","WIF","FLOKI","BONK","DOGS",
                              "BOME","NOT","APE","GMT","CHZ","GALA","SAND","MANA"]
 
-BOT_VERSION = "v32"
+BOT_VERSION = "v32G"
 BOT_NAME    = "TRADING SIGNAL MASTER"
 BOT_HEADER  = f"⚙️ {BOT_NAME} {BOT_VERSION}"
 STARTUP_MSG = (
     "╔══════════════════════════════════════╗\n"
-    "║   🚀  TRADING SIGNAL MASTER  v32  🚀  ║\n"
+    "║   🚀  TRADING SIGNAL MASTER  v32G 🚀  ║\n"
     "║   Smart  •  Fast  •  Accurate  •  AI ║\n"
     "╚══════════════════════════════════════╝"
 )
@@ -517,6 +517,19 @@ def get_signal_grade(score, whale, oi_rising, tf_score, vol_ok, rsi_ok,
     elif pts >= 11:    return "⭐⭐ Grade A"
     elif pts >= 8:     return "✅ Grade B"
     else:              return "⚠️ Grade C"
+
+def get_position_size_pct(grade: str) -> float:
+    """Returns suggested capital % based on signal grade."""
+    if "A+" in grade: return 10.0
+    elif "A"  in grade: return 7.0
+    elif "B"  in grade: return 5.0
+    else:               return 3.0
+
+def get_grade_emoji(grade: str) -> str:
+    if "A+" in grade: return "🏆"
+    elif "A"  in grade: return "⭐"
+    elif "B"  in grade: return "✅"
+    else:               return "⚠️"
 
 # ================= FILTERS =================
 def is_volume_confirmed(klines):
@@ -1134,8 +1147,8 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
     global pending_signals, sent_coins, daily_sent_coins
     if check_circuit_breaker(): return False
     if not is_good_trading_session(): return False
-    if coin in daily_sent_coins and not is_instant:
-        logger.info(f"{coin} already sent today"); return False
+    # Removed daily_sent_coins block — use coin_cooldowns instead for better control
+    # This was causing all signals to stop after the first burst
 
     live_price = get_price(setup["symbol"])
     if not live_price: return False
@@ -1224,6 +1237,8 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
     setup["leverage"] = lev
     price_range    = (max(closes[-10:])-min(closes[-10:]))/10
     eta            = int(abs(tp-entry)/(price_range if price_range>0 else 0.001)*15)
+    eta            = max(30, min(eta, 1440))  # clamp between 30min and 24h
+    setup["eta_minutes"] = eta  # store for cooldown calculation
     expiry_minutes = INSTANT_EXPIRY_MINUTES if is_instant else SIGNAL_EXPIRY_MINUTES
     expiry_time    = get_ist_datetime()+timedelta(minutes=expiry_minutes)
     expiry_str     = expiry_time.strftime("%I:%M %p IST")
@@ -1249,43 +1264,66 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
     suggested_size_pct = 1.0 / (sl_pct * lev / 100) * 100 if sl_pct > 0 else 2.0
     suggested_size_pct = min(suggested_size_pct, 10.0)  # cap at 10% of capital
 
-    if is_instant: header = f"⚡ <b>{BOT_HEADER}</b>\n<b>INSTANT SIGNAL — {coin}</b>"
-    elif is_river: header = f"🌊 <b>{BOT_HEADER}</b>\n<b>RIVER SIGNAL</b>"
-    else:          header = f"🔥 <b>{BOT_HEADER}</b>\n<b>VERIFIED SETUP — {coin}</b>"
+    pos_size_pct = get_position_size_pct(grade)
+    grade_em     = get_grade_emoji(grade)
+    dir_em       = "🟢" if setup["direction"] == "BUY" else "🔴"
 
-    msg  = f"{header}\n"
-    msg += f"{S('═')}\n"
-    msg += f"🏆 Score: <b>{int(setup['setup_score'])}/100</b>  |  {grade}\n"
-    msg += f"{S()}\n\n"
-    msg += f"📢 <b>{setup['direction']}</b>  |  Leverage: <b>{lev}x</b>  |  {cond_lbl}\n\n"
-    msg += f"💰 Entry:  <code>{format_price(entry)}</code>\n"
-    msg += f"🎯 TP:     <code>{format_price(tp)}</code>  (+{tp_pct:.2f}%)\n"
-    msg += f"🛑 SL:     <code>{format_price(sl)}</code>  (-{sl_pct:.2f}%)\n\n"
-    msg += f"📈 Profit Target: <b>{profit_target:.2f}%</b>  |  RR: <b>1:{rr_ratio:.1f}</b>\n"
-    msg += f"💡 Suggested Size: ~{suggested_size_pct:.1f}% of capital\n"
-    msg += f"{S()}\n"
-    # Show adjusted score vs base for transparency
-    primary_name  = setup["pattern"].split(" + ")[0]
-    base_s        = next((x[1] for x in detect_patterns(setup["symbol"], klines_15m, entry, 1)
-                          if x[0] == primary_name), setup["setup_score"])
-    adj_s         = get_adjusted_score(primary_name, base_s, market_condition)
-    score_note    = f" (base:{base_s:.0f} → live:{adj_s:.0f})" if abs(adj_s - base_s) > 1 else ""
-    msg += f"📌 Pattern:     {setup['pattern']}{score_note}\n"
-    msg += f"📊 RSI: {rsi_val:.1f}  |  ADX: {adx_val:.1f}  |  Momentum: {mom:+.2f}%\n"
-    msg += f"📊 TF Align:    {tf_label}\n"
-    msg += f"📊 SuperTrend:  {'✅ Confirmed' if st_ok else '⚠️ Mixed'} ({st_15m}/{st_1h})\n"
-    msg += f"📊 VWAP:        {vwap_label}\n"
-    msg += f"📊 OI:          {oi_label}  |  🐋 Whale: {'✅ Yes' if whale else '❌ No'}\n"
-    if zone_ok:   msg += f"📍 Zone:        ✅ In {'demand' if setup['direction']=='BUY' else 'supply'} zone {zone_label}\n"
-    if div_label: msg += f"{div_label}\n"
-    msg += f"{S()}\n"
-    msg += f"⏳ ETA: ~{eta} mins  |  ⏰ Expires: {expiry_str}\n"
-    msg += f"✏️ ATR (1h): {format_price(atr_1h)}"
-    if is_instant: msg += f"\n\n⚡ <b>INSTANT — Act within {expiry_minutes} mins!</b>"
+    if is_instant: sig_type = "⚡ INSTANT SIGNAL"
+    elif is_river: sig_type = "🌊 RIVER SIGNAL"
+    else:          sig_type = "🔥 VERIFIED SETUP"
+
+    direction   = setup["direction"]
+    pattern_txt = setup["pattern"]
+    sig_score   = setup["setup_score"]
+    pos_size_pct = get_position_size_pct(grade)
+    grade_em     = get_grade_emoji(grade)
+    dir_em       = "🟢" if direction == "BUY" else "🔴"
+
+    if is_instant: sig_type = "⚡ INSTANT SIGNAL"
+    elif is_river: sig_type = "🌊 RIVER SIGNAL"
+    else:          sig_type = "🔥 VERIFIED SETUP"
+
+    msg  = "═" * 32 + "\n"
+    msg += "  " + sig_type + "\n"
+    msg += "  ⚙️ TRADING SIGNAL MASTER v32G\n"
+    msg += "═" * 32 + "\n\n"
+    msg += f"  🪙 <b>{coin}</b>  |  {dir_em} <b>{direction}</b>  |  🔧 <b>{lev}x</b>\n"
+    msg += f"  {grade_em} {grade}  |  Score: <b>{sig_score:.0f}/100</b>\n"
+    msg += f"  {cond_lbl}\n"
+    msg += "─" * 32 + "\n\n"
+    msg += f"  💰 <b>ENTRY</b>    <code>{format_price(entry)}</code>\n"
+    msg += f"  🎯 <b>TARGET</b>   <code>{format_price(tp)}</code>  (+{tp_pct:.2f}%)\n"
+    msg += f"  🛑 <b>STOP LOSS</b> <code>{format_price(sl)}</code>  (-{sl_pct:.2f}%)\n\n"
+    msg += f"  📈 Leveraged Profit: <b>{profit_target:.1f}%</b>\n"
+    msg += f"  ⚖️ Risk / Reward: <b>1 : {rr_ratio:.1f}</b>\n"
+    msg += f"  💼 Position Size: <b>{pos_size_pct:.0f}% of capital</b>\n"
+    msg += "─" * 32 + "\n\n"
+    primary_name = pattern_txt.split(" + ")[0]
+    base_s       = next((x[1] for x in detect_patterns(setup["symbol"], klines_15m, entry, 1) if x[0]==primary_name), sig_score)
+    adj_s        = get_adjusted_score(primary_name, base_s, market_condition)
+    score_note   = f" (live:{adj_s:.0f})" if abs(adj_s-base_s) > 1 else ""
+    msg += f"  📌 Pattern: <b>{pattern_txt}</b>{score_note}\n"
+    msg += f"  📊 RSI: {rsi_val:.1f}  ADX: {adx_val:.1f}  Mom: {mom:+.2f}%\n"
+    msg += f"  📡 TF Align: {tf_label}\n"
+    st_status = "✅" if st_ok else "⚠️"
+    whale_status = "✅" if whale else "❌"
+    msg += f"  🌀 SuperTrend: {st_status}  |  VWAP: {vwap_label}\n"
+    msg += f"  📦 OI: {oi_label}  |  🐋 Whale: {whale_status}\n"
+    if zone_ok:
+        zone_type = "demand" if direction == "BUY" else "supply"
+        msg += f"  📍 Zone: ✅ In {zone_type} zone {zone_label}\n"
+    if div_label: msg += f"  {div_label}\n"
+    msg += "─" * 32 + "\n"
+    msg += f"  ⏳ ETA: ~{eta} mins  |  ⏰ Expires: {expiry_str}\n"
+    if is_instant: msg += "  ⚡ <b>Act immediately — instant signal!</b>\n"
     if news:
-        msg += f"\n{S()}\n<b>📰 Related News:</b>\n"
-        for n in news: msg += f"• {n[:70]}\n"
-    msg += f"\n{S('═')}\n🕐 {get_ist_time()}"
+        msg += "─" * 32 + "\n  📰 <b>News:</b>\n"
+        for n in news:
+            msg += f"  • {n[:65]}\n"
+    msg += "═" * 32 + "\n"
+    msg += f"  🕐 {get_ist_time()}"
+
+
 
     setup.update({
         "entry": entry,"sl": sl,"tp": tp,
@@ -1300,7 +1338,12 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
         {"text": "❌ Ignore",         "callback_data": f"IGNORE_{coin}"}
     ]]}
     if send_telegram(msg, reply_markup=reply_markup):
-        sent_coins.append(coin); daily_sent_coins.add(coin); save_daily_sent()
+        sent_coins.append(coin)
+        # ETA-based cooldown — coin cannot send another signal until its ETA passes
+        # This means each coin has a unique cooldown based on how long the trade is expected to take
+        eta_minutes = setup.get("eta_minutes", 120)
+        coin_cooldowns[coin] = get_ist_datetime() + timedelta(minutes=int(eta_minutes))
+        logger.info(f"{coin} cooldown set for {eta_minutes} minutes (ETA-based)")
         logger.info(f"Signal: {coin}|{setup['direction']}|Score:{setup['setup_score']}|{grade}")
         return True
     return False
@@ -1345,14 +1388,79 @@ def check_active_trades():
                             f"Consider reviewing your position.\n{S()}"
                         )
                         active_trades[coin]["reversal_alerted"]=True; save_active_trades()
-        if not trade.get("breakeven_sent",False) and pnl >= 10:
+        # Profit milestone notifications with SL move instructions
+        milestones = trade.get("milestones_sent", [])
+        entry_p  = trade["entry"]
+        sl_now   = trade["sl"]
+        tp_p     = trade["tp"]
+        direction= trade["direction"]
+
+        # Milestone 1 — 10% profit: move SL to entry
+        if 10 <= pnl < 20 and "p10" not in milestones:
+            new_sl_suggestion = format_price(entry_p)
+            active_trades[coin].setdefault("milestones_sent", []).append("p10")
             send_telegram(
-                f"🟡 <b>{BOT_HEADER} BREAK-EVEN ALERT</b>\n{S()}\n"
-                f"🔹 <b>{coin}</b> reached +10% profit\n"
-                f"💡 Consider moving SL to entry.\n"
-                f"📈 Current PnL: {fmt_pnl(pnl)}\n{S()}"
+                "🎯 " + "═"*28 + "\n"
+                f"  📊 PROFIT MILESTONE 1 — {coin}\n"
+                "─"*30 + "\n"
+                f"  ✅ +10% Profit reached!\n\n"
+                f"  💡 <b>Action Required:</b>\n"
+                f"  Move your Stop Loss to ENTRY\n"
+                f"  New SL → <code>{new_sl_suggestion}</code>\n"
+                f"  (Your trade is now risk-free)\n\n"
+                f"  📈 Current PnL: {fmt_pnl(pnl)}\n"
+                f"  💰 Entry: {format_price(entry_p)}\n"
+                "═"*30
             )
-            active_trades[coin]["breakeven_sent"]=True; save_active_trades()
+            save_active_trades()
+
+        # Milestone 2 — 20% profit: move SL to 50% of TP
+        elif 20 <= pnl < 35 and "p20" not in milestones:
+            if direction == "BUY":
+                sl_suggestion = entry_p + (tp_p - entry_p) * 0.5
+            else:
+                sl_suggestion = entry_p - (entry_p - tp_p) * 0.5
+            active_trades[coin].setdefault("milestones_sent", []).append("p20")
+            send_telegram(
+                "🎯 " + "═"*28 + "\n"
+                f"  📊 PROFIT MILESTONE 2 — {coin}\n"
+                "─"*30 + "\n"
+                f"  🔥 +20% Profit reached!\n\n"
+                f"  💡 <b>Action Required:</b>\n"
+                f"  Move SL to 50% of your TP distance\n"
+                f"  New SL → <code>{format_price(sl_suggestion)}</code>\n"
+                f"  (Locking in minimum 10% profit)\n\n"
+                f"  📈 Current PnL: {fmt_pnl(pnl)}\n"
+                "═"*30
+            )
+            save_active_trades()
+
+        # Milestone 3 — 35% profit: move SL to 75% of TP
+        elif pnl >= 35 and "p35" not in milestones:
+            if direction == "BUY":
+                sl_suggestion = entry_p + (tp_p - entry_p) * 0.75
+            else:
+                sl_suggestion = entry_p - (entry_p - tp_p) * 0.75
+            active_trades[coin].setdefault("milestones_sent", []).append("p35")
+            send_telegram(
+                "🎯 " + "═"*28 + "\n"
+                f"  📊 PROFIT MILESTONE 3 — {coin}\n"
+                "─"*30 + "\n"
+                f"  🚀 +35% Profit reached!\n\n"
+                f"  💡 <b>Action Required:</b>\n"
+                f"  Move SL to 75% of your TP distance\n"
+                f"  New SL → <code>{format_price(sl_suggestion)}</code>\n"
+                f"  (Locking in minimum 25% profit)\n\n"
+                f"  📈 Current PnL: {fmt_pnl(pnl)}\n"
+                f"  🎯 TP target: {format_price(tp_p)}\n"
+                "═"*30
+            )
+            save_active_trades()
+
+        # Legacy breakeven check
+        if not trade.get("breakeven_sent", False) and pnl >= 10:
+            active_trades[coin]["breakeven_sent"] = True
+            save_active_trades()
         hit = None
         if trade["direction"]=="BUY":
             if price>=trade["tp"]:   hit="WIN"
@@ -1430,9 +1538,11 @@ def poll_telegram():
                         # Parse action and coin name safely
                         if "_" not in data:
                             logger.warning(f"Invalid callback data: {data}")
-                            continue
-                        action = data.split("_", 1)[0]   # ACTIVATE or IGNORE
-                        coin   = data.split("_", 1)[1]   # coin name
+                            action = "UNKNOWN"
+                            coin   = ""
+                        else:
+                            action = data.split("_", 1)[0]   # ACTIVATE or IGNORE
+                            coin   = data.split("_", 1)[1]   # coin name
 
                         logger.info(f"Callback received: action={action} coin={coin} pending={list(pending_signals.keys())}")
 
@@ -1500,19 +1610,28 @@ def poll_telegram():
                                     tp_pct  = abs(tp_p - entry_p) / entry_p * 100 if entry_p > 0 else 0
                                     rr      = tp_pct / sl_pct if sl_pct > 0 else 0
 
+                                    dir_arrow = "🟢 LONG" if dirn == "BUY" else "🔴 SHORT"
                                     send_telegram(
-                                        f"🚀 <b>{BOT_HEADER}</b>\n"
-                                        f"{S('═')}\n"
-                                        f"✅ <b>{coin}</b> TRADE ACTIVATED\n\n"
-                                        f"📢 {dirn} | Leverage: <b>{lev}x</b>\n"
-                                        f"💰 Entry: <code>{format_price(entry_p)}</code>\n"
-                                        f"🎯 TP:    <code>{format_price(tp_p)}</code>  (+{tp_pct:.2f}%)\n"
-                                        f"🛑 SL:    <code>{format_price(sl_p)}</code>  (-{sl_pct:.2f}%)\n"
-                                        f"📊 RR:   1:{rr:.1f}\n\n"
-                                        f"📌 Pattern: {pat}\n"
-                                        f"🕐 Time: {get_ist_time()}\n"
-                                        f"{S('═')}\n"
-                                        f"✏️ Set your trade on CoinDCX now!"
+                                        "═" * 32 + "\n"
+                                        "  🚀 TRADE ACTIVATED\n"
+                                        "  ⚙️ TRADING SIGNAL MASTER v32G\n"
+                                        + "═" * 32 + "\n\n"
+                                        f"  🪙 <b>{coin}</b>  |  {dir_arrow}\n"
+                                        f"  🔧 Leverage: <b>{lev}x</b>\n"
+                                        f"  📊 RR: 1:{rr:.1f}\n"
+                                        + "─" * 32 + "\n\n"
+                                        f"  💰 <b>Entry</b>     <code>{format_price(entry_p)}</code>\n"
+                                        f"  🎯 <b>TP Target</b>  <code>{format_price(tp_p)}</code>  (+{tp_pct:.2f}%)\n"
+                                        f"  🛑 <b>Stop Loss</b>  <code>{format_price(sl_p)}</code>  (-{sl_pct:.2f}%)\n\n"
+                                        f"  📌 Pattern: {pat}\n"
+                                        + "─" * 32 + "\n"
+                                        "  📋 <b>Milestone Plan:</b>\n"
+                                        f"  +10% → Move SL to entry {format_price(entry_p)}\n"
+                                        f"  +20% → SL to 50% of TP\n"
+                                        f"  +35% → SL to 75% of TP\n"
+                                        + "═" * 32 + "\n"
+                                        f"  🕐 {get_ist_time()}\n"
+                                        "  ✏️ Set trade on CoinDCX now!"
                                     )
                                     logger.info(f"ACTIVATED: {coin}|{dirn}|Entry:{entry_p}|Lev:{lev}x|RR:1:{rr:.1f}")
 
@@ -1732,16 +1851,18 @@ def is_btc_crashing() -> bool:
     except Exception: return False
 
 def scan_coins(btc_trend, fng, market_condition):
-    btc_crashing = is_btc_crashing()
+    btc_crashing       = is_btc_crashing()
+    signals_this_cycle = 0
+    MAX_SIGNALS_PER_CYCLE = 3  # max signals per 5-min scan — prevents burst flooding
     for coin in COINS:
         try:
             symbol=coin+"USDT"; price=get_price(symbol); klines=get_klines(symbol,"15m")
             if not price or not klines: continue
-            # Skip coin if it is in cooldown after a recent loss
+            # Skip coin if it is in cooldown (after signal sent OR after loss)
             if coin in coin_cooldowns:
                 cooldown_until = coin_cooldowns[coin]
                 if get_ist_datetime() < cooldown_until:
-                    logger.info(f"Skip {coin} — in cooldown until {cooldown_until.strftime('%H:%M')}")
+                    logger.info(f"Skip {coin} — cooldown until {cooldown_until.strftime('%H:%M')}")
                     continue
                 else:
                     del coin_cooldowns[coin]
@@ -1794,11 +1915,13 @@ def scan_coins(btc_trend, fng, market_condition):
                           "tf_score":tf_score}
 
                 if (coin not in active_trades and coin not in pending_signals
-                        and len(active_trades) < MAX_ACTIVE_TRADES):
+                        and len(active_trades) < MAX_ACTIVE_TRADES
+                        and signals_this_cycle < MAX_SIGNALS_PER_CYCLE):
                     is_inst = score >= INSTANT_SIGNAL_THRESHOLD
                     logger.info(f"{'INSTANT' if is_inst else 'SIGNAL'}: {coin}|{direction}|Score:{score:.1f}|{primary}")
                     if format_and_send(setup,coin,is_instant=is_inst,market_condition=market_condition):
-                        signal_sent = True
+                        signal_sent          = True
+                        signals_this_cycle  += 1
 
         except Exception as e: logger.error(f"Scan {coin}: {e}",exc_info=True)
         time.sleep(DELAY_BETWEEN_COINS)
