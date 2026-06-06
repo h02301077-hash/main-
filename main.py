@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -1903,6 +1903,26 @@ def get_patterns_ranked_text() -> str:
     msg += "</pre>"
     return msg
 
+
+# ================= BUTTON MENU =================
+def send_menu():
+    """Sends a beautiful tap-button command menu to Telegram."""
+    send_telegram(
+        f"📱 <b>{BOT_HEADER}</b>\n"
+        f"Tap any button below:",
+        reply_markup={
+            "keyboard": [
+                [{"text": "📊 Trades"},    {"text": "⏳ Pending"},   {"text": "📈 Stats"}],
+                [{"text": "📅 Summary"},   {"text": "🔥 Streak"},    {"text": "⭐ Best"}],
+                [{"text": "🛡️ Risk"},      {"text": "🧠 Learn"},     {"text": "📋 Journal"}],
+                [{"text": "📰 News"},      {"text": "🌍 Market"},    {"text": "🔍 Scan"}],
+                [{"text": "📊 Patterns"},  {"text": "⚙️ CB Status"}, {"text": "❓ Help"}],
+            ],
+            "resize_keyboard": True,
+            "persistent":       True,
+        }
+    )
+
 # ================= TELEGRAM POLLING =================
 
 
@@ -2303,6 +2323,26 @@ def get_patterns_ranked_text() -> str:
     msg += "</pre>"
     return msg
 
+
+# ================= BUTTON MENU =================
+def send_menu():
+    """Sends a beautiful tap-button command menu to Telegram."""
+    send_telegram(
+        f"📱 <b>{BOT_HEADER}</b>\n"
+        f"Tap any button below:",
+        reply_markup={
+            "keyboard": [
+                [{"text": "📊 Trades"},    {"text": "⏳ Pending"},   {"text": "📈 Stats"}],
+                [{"text": "📅 Summary"},   {"text": "🔥 Streak"},    {"text": "⭐ Best"}],
+                [{"text": "🛡️ Risk"},      {"text": "🧠 Learn"},     {"text": "📋 Journal"}],
+                [{"text": "📰 News"},      {"text": "🌍 Market"},    {"text": "🔍 Scan"}],
+                [{"text": "📊 Patterns"},  {"text": "⚙️ CB Status"}, {"text": "❓ Help"}],
+            ],
+            "resize_keyboard": True,
+            "persistent":       True,
+        }
+    )
+
 # ================= TELEGRAM POLLING =================
 def poll_telegram():
     global last_update_id
@@ -2350,99 +2390,60 @@ def poll_telegram():
                     logger.info(f"Button: {action} | Coin: {coin} | Pending: {list(pending_signals.keys())}")
 
                     if action == "ACTIVATE":
-                        if not coin:
-                            send_telegram(f"❌ <b>{BOT_HEADER}</b>\nInvalid signal data.")
-
-                        elif coin not in pending_signals:
-                            send_telegram(
-                                f"⏰ <b>{BOT_HEADER}</b>\n"
-                                f"Signal for <b>{coin}</b> has expired.\n"
-                                f"Please wait for the next signal."
-                            )
-
-                        elif coin in active_trades:
-                            send_telegram(
-                                f"⚠️ <b>{BOT_HEADER}</b>\n"
-                                f"<b>{coin}</b> is already an active trade."
-                            )
-
-                        elif len(active_trades) >= MAX_ACTIVE_TRADES:
-                            send_telegram(
-                                f"⚠️ <b>{BOT_HEADER}</b>\n"
-                                f"Maximum {MAX_ACTIVE_TRADES} active trades reached.\n"
-                                f"Close a position first."
-                            )
-
-                        else:
-                            # ── SAFE ACTIVATE ────────────────────────────
-                            sig = dict(pending_signals[coin])
-
-                            # Fresh live price
-                            lp = get_price(sig.get("symbol", coin + "USDT"))
-                            if lp and lp > 0:
-                                sig["entry"] = lp
-
-                            # Reset all tracking flags
-                            sig["breakeven_sent"]   = False
-                            sig["partial_tp_taken"] = False
-                            sig["reversal_alerted"] = False
-                            sig["milestones_sent"]  = []
-                            sig["timestamp"]        = get_ist_datetime()
-                            sig["expires_at"]       = None
-
-                            # Save to active trades
+                        if coin in pending_signals:
+                            # Simple working activate — same as original
+                            lp = get_price(pending_signals[coin].get("symbol", coin+"USDT"))
+                            if lp:
+                                pending_signals[coin]["entry"] = lp
+                            pending_signals[coin]["breakeven_sent"]   = False
+                            pending_signals[coin]["partial_tp_taken"] = False
+                            pending_signals[coin]["reversal_alerted"] = False
+                            pending_signals[coin]["milestones_sent"]  = []
+                            pending_signals[coin]["timestamp"]        = get_ist_datetime()
+                            pending_signals[coin]["expires_at"]       = None
                             with trade_lock:
-                                active_trades[coin] = sig
-                            del pending_signals[coin]
+                                active_trades[coin] = pending_signals[coin]
                             save_active_trades()
-
-                            # Build values for message
-                            entry_p  = sig.get("entry", 0)
-                            sl_p     = sig.get("sl", 0)
-                            tp_p     = sig.get("tp", 0)
-                            lev      = sig.get("leverage", 5)
-                            dirn     = sig.get("direction", "?")
-                            pat      = sig.get("pattern", "?")
-                            sl_pct   = abs(entry_p - sl_p) / entry_p * 100 if entry_p > 0 else 0
-                            tp_pct   = abs(tp_p - entry_p) / entry_p * 100 if entry_p > 0 else 0
-                            rr       = round(tp_pct / sl_pct, 1) if sl_pct > 0 else 0
-                            dir_em   = "🟢 LONG" if dirn == "BUY" else "🔴 SHORT"
-
-                            # Milestone SL levels
+                            # Build confirmation values
+                            t       = active_trades[coin]
+                            ep      = t.get("entry", 0)
+                            sl_p    = t.get("sl", 0)
+                            tp_p    = t.get("tp", 0)
+                            lev     = t.get("leverage", 5)
+                            dirn    = t.get("direction", "?")
+                            pat     = t.get("pattern", "?")
+                            sl_pct  = abs(ep-sl_p)/ep*100 if ep > 0 else 0
+                            tp_pct  = abs(tp_p-ep)/ep*100 if ep > 0 else 0
+                            rr      = round(tp_pct/sl_pct,1) if sl_pct > 0 else 0
                             if dirn == "BUY":
-                                sl_10 = format_price(entry_p)
-                                sl_20 = format_price(entry_p + (tp_p - entry_p) * 0.5)
-                                sl_35 = format_price(entry_p + (tp_p - entry_p) * 0.75)
+                                sl_10 = format_price(ep)
+                                sl_20 = format_price(ep + (tp_p-ep)*0.5)
+                                sl_35 = format_price(ep + (tp_p-ep)*0.75)
                             else:
-                                sl_10 = format_price(entry_p)
-                                sl_20 = format_price(entry_p - (entry_p - tp_p) * 0.5)
-                                sl_35 = format_price(entry_p - (entry_p - tp_p) * 0.75)
-
+                                sl_10 = format_price(ep)
+                                sl_20 = format_price(ep - (ep-tp_p)*0.5)
+                                sl_35 = format_price(ep - (ep-tp_p)*0.75)
                             send_telegram(
-                                f"<pre>"
-                                f"{'🚀 TRADE ACTIVATED':^34}\n"
-                                f"{'⚙️ TSM v32G':^34}\n"
-                                f"{'═'*34}\n"
-                                f"  🪙 {coin:<10} {dir_em}\n"
-                                f"  🔧 Leverage: {lev}x  |  RR: 1:{rr}\n"
-                                f"{'─'*34}\n"
-                                f"  💰 Entry    {format_price(entry_p):>16}\n"
-                                f"  🎯 Target   {format_price(tp_p):>16} +{tp_pct:.1f}%\n"
-                                f"  🛑 Stop     {format_price(sl_p):>16} -{sl_pct:.1f}%\n"
-                                f"{'─'*34}\n"
-                                f"  📌 {pat[:30]}\n"
-                                f"{'─'*34}\n"
-                                f"  📋 MILESTONE PLAN\n"
-                                f"  +10% → SL to {sl_10}\n"
-                                f"  +20% → SL to {sl_20}\n"
-                                f"  +35% → SL to {sl_35}\n"
-                                f"{'─'*34}\n"
-                                f"  🕐 {get_ist_time()}\n"
-                                f"  ✏️ Set on CoinDCX now!\n"
-                                f"{'═'*34}"
-                                f"</pre>"
+                                f"🚀 <b>{BOT_HEADER} {coin} Activated!</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"📢 {dirn} | 🔧 {lev}x | RR 1:{rr}\n"
+                                f"💰 Entry:  <code>{format_price(ep)}</code>\n"
+                                f"🎯 Target: <code>{format_price(tp_p)}</code> (+{tp_pct:.1f}%)\n"
+                                f"🛑 Stop:   <code>{format_price(sl_p)}</code> (-{sl_pct:.1f}%)\n"
+                                f"📌 {pat[:35]}\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"📋 Milestone Plan:\n"
+                                f"  +10% → Move SL to {sl_10}\n"
+                                f"  +20% → Move SL to {sl_20}\n"
+                                f"  +35% → Move SL to {sl_35}\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"✏️ Set your trade on CoinDCX now!"
                             )
-                            logger.info(f"✅ ACTIVATED: {coin}|{dirn}|Entry:{entry_p}|{lev}x")
+                            del pending_signals[coin]
+                            logger.info(f"ACTIVATED: {coin}|{dirn}|Entry:{ep}|{lev}x")
+                        else:
+                            send_telegram(f"⏰ <b>{BOT_HEADER}</b> Signal for <b>{coin}</b> expired.")
+                            logger.warning(f"ACTIVATE failed: {coin} not in pending")
 
                     elif action == "IGNORE":
                         if coin in pending_signals:
@@ -2453,6 +2454,30 @@ def poll_telegram():
                 # ── TEXT COMMANDS ─────────────────────────────────────────
                 elif "message" in update:
                     txt = update["message"].get("text", "").strip().lower()
+
+                    # Button text shortcuts (tap buttons)
+                    btn_map = {
+                        "📊 trades":   "/trades",
+                        "⏳ pending":  "/pending",
+                        "📈 stats":    "/stats",
+                        "📅 summary":  "/summary",
+                        "🔥 streak":   "/streak",
+                        "⭐ best":     "/best",
+                        "🛡️ risk":    "/risk",
+                        "🧠 learn":    "/learn",
+                        "📋 journal":  "/journal",
+                        "📰 news":     "/news",
+                        "🌍 market":   "/market",
+                        "🔍 scan":     "/scan",
+                        "📊 patterns": "/patterns",
+                        "⚙️ cb status":"/cb",
+                        "❓ help":     "/help",
+                        "menu":        "/menu",
+                    }
+                    # Normalize button text to command
+                    txt_lower = txt.lower().strip()
+                    if txt_lower in btn_map:
+                        txt = btn_map[txt_lower]
 
                     if   txt == "/stats":    send_telegram(get_pattern_stats_text())
                     elif txt == "/trades":   send_telegram(get_active_trades_text())
@@ -2538,12 +2563,8 @@ def poll_telegram():
                         send_telegram(run_backtest(bc))
                     elif txt == "/help":
                         send_telegram(get_help_text())
-                    elif txt == "/start":
-                        send_telegram(
-                            f"👋 <b>{BOT_HEADER}</b>\n"
-                            f"Bot is running!\n"
-                            f"Type /help to see all commands."
-                        )
+                    elif txt in ("/start", "/menu"):
+                        send_menu()
 
         except requests.RequestException as e:
             logger.error(f"Poll network error: {e}")
@@ -2766,6 +2787,9 @@ def main():
         f"📌 Type /help for all commands"
     )
     logger.info(f"{BOT_NAME} {BOT_VERSION} started | {len(COINS)} coins | Score: {MIN_SETUP_SCORE}+")
+    # Send tap-button menu on startup
+    time.sleep(2)
+    send_menu()
     while True:
         try:
             btc_price  = get_price("BTCUSDT")
