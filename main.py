@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -1919,7 +1919,6 @@ def send_menu():
                 [{"text": "📊 Patterns"},  {"text": "⚙️ CB Status"}, {"text": "❓ Help"}],
             ],
             "resize_keyboard": True,
-            "persistent":       True,
         }
     )
 
@@ -2339,7 +2338,6 @@ def send_menu():
                 [{"text": "📊 Patterns"},  {"text": "⚙️ CB Status"}, {"text": "❓ Help"}],
             ],
             "resize_keyboard": True,
-            "persistent":       True,
         }
     )
 
@@ -2369,87 +2367,75 @@ def poll_telegram():
                     cb   = update["callback_query"]
                     data = cb.get("data", "")
                     cbid = cb.get("id", "")
-
-                    # Answer callback immediately — stops spinner on button
                     try:
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
-                            json={"callback_query_id": cbid, "text": "✅ Processing..."},
-                            timeout=5
+                            json={"callback_query_id": cbid, "text": "Processing..."},
+                            timeout=10
                         )
                     except Exception:
                         pass
-
-                    if not data or "_" not in data:
-                        continue
-
-                    parts  = data.split("_", 1)
-                    action = parts[0]
-                    coin   = parts[1] if len(parts) > 1 else ""
-
-                    logger.info(f"Button: {action} | Coin: {coin} | Pending: {list(pending_signals.keys())}")
-
-                    if action == "ACTIVATE":
-                        if coin in pending_signals:
-                            # Simple working activate — same as original
-                            lp = get_price(pending_signals[coin].get("symbol", coin+"USDT"))
-                            if lp:
-                                pending_signals[coin]["entry"] = lp
-                            pending_signals[coin]["breakeven_sent"]   = False
-                            pending_signals[coin]["partial_tp_taken"] = False
-                            pending_signals[coin]["reversal_alerted"] = False
-                            pending_signals[coin]["milestones_sent"]  = []
-                            pending_signals[coin]["timestamp"]        = get_ist_datetime()
-                            pending_signals[coin]["expires_at"]       = None
-                            with trade_lock:
-                                active_trades[coin] = pending_signals[coin]
-                            save_active_trades()
-                            # Build confirmation values
-                            t       = active_trades[coin]
-                            ep      = t.get("entry", 0)
-                            sl_p    = t.get("sl", 0)
-                            tp_p    = t.get("tp", 0)
-                            lev     = t.get("leverage", 5)
-                            dirn    = t.get("direction", "?")
-                            pat     = t.get("pattern", "?")
-                            sl_pct  = abs(ep-sl_p)/ep*100 if ep > 0 else 0
-                            tp_pct  = abs(tp_p-ep)/ep*100 if ep > 0 else 0
-                            rr      = round(tp_pct/sl_pct,1) if sl_pct > 0 else 0
-                            if dirn == "BUY":
-                                sl_10 = format_price(ep)
-                                sl_20 = format_price(ep + (tp_p-ep)*0.5)
-                                sl_35 = format_price(ep + (tp_p-ep)*0.75)
+                    if data and "_" in data:
+                        action = data.split("_", 1)[0]
+                        coin   = data.split("_", 1)[1]
+                        logger.info(f"Callback: {action} {coin} | pending={list(pending_signals.keys())}")
+                        if action == "ACTIVATE":
+                            if coin in pending_signals:
+                                lp = get_price(pending_signals[coin].get("symbol", coin + "USDT"))
+                                if lp and lp > 0:
+                                    pending_signals[coin]["entry"] = lp
+                                pending_signals[coin]["breakeven_sent"]   = False
+                                pending_signals[coin]["partial_tp_taken"] = False
+                                pending_signals[coin]["reversal_alerted"] = False
+                                pending_signals[coin]["milestones_sent"]  = []
+                                pending_signals[coin]["timestamp"]        = get_ist_datetime()
+                                pending_signals[coin]["expires_at"]       = None
+                                with trade_lock:
+                                    active_trades[coin] = pending_signals[coin]
+                                save_active_trades()
+                                ep     = active_trades[coin].get("entry", 0)
+                                sl_p   = active_trades[coin].get("sl", 0)
+                                tp_p   = active_trades[coin].get("tp", 0)
+                                lev    = active_trades[coin].get("leverage", 5)
+                                dirn   = active_trades[coin].get("direction", "?")
+                                pat    = active_trades[coin].get("pattern", "?")
+                                sl_pct = abs(ep - sl_p) / ep * 100 if ep > 0 else 0
+                                tp_pct = abs(tp_p - ep) / ep * 100 if ep > 0 else 0
+                                rr     = round(tp_pct / sl_pct, 1) if sl_pct > 0 else 0
+                                if dirn == "BUY":
+                                    sl_10 = format_price(ep)
+                                    sl_20 = format_price(ep + (tp_p - ep) * 0.5)
+                                    sl_35 = format_price(ep + (tp_p - ep) * 0.75)
+                                else:
+                                    sl_10 = format_price(ep)
+                                    sl_20 = format_price(ep - (ep - tp_p) * 0.5)
+                                    sl_35 = format_price(ep - (ep - tp_p) * 0.75)
+                                send_telegram(
+                                    f"🚀 <b>{BOT_HEADER} {coin} Activated!</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📢 {dirn} | 🔧 {lev}x | RR 1:{rr}\n"
+                                    f"💰 Entry:  <code>{format_price(ep)}</code>\n"
+                                    f"🎯 Target: <code>{format_price(tp_p)}</code> (+{tp_pct:.1f}%)\n"
+                                    f"🛑 Stop:   <code>{format_price(sl_p)}</code> (-{sl_pct:.1f}%)\n"
+                                    f"📌 {pat[:35]}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📋 Milestone Plan:\n"
+                                    f"  +10% → Move SL to {sl_10}\n"
+                                    f"  +20% → Move SL to {sl_20}\n"
+                                    f"  +35% → Move SL to {sl_35}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"✏️ Set your trade on CoinDCX now!"
+                                )
+                                del pending_signals[coin]
+                                logger.info(f"ACTIVATED: {coin}|{dirn}|Entry:{ep}|{lev}x")
                             else:
-                                sl_10 = format_price(ep)
-                                sl_20 = format_price(ep - (ep-tp_p)*0.5)
-                                sl_35 = format_price(ep - (ep-tp_p)*0.75)
-                            send_telegram(
-                                f"🚀 <b>{BOT_HEADER} {coin} Activated!</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📢 {dirn} | 🔧 {lev}x | RR 1:{rr}\n"
-                                f"💰 Entry:  <code>{format_price(ep)}</code>\n"
-                                f"🎯 Target: <code>{format_price(tp_p)}</code> (+{tp_pct:.1f}%)\n"
-                                f"🛑 Stop:   <code>{format_price(sl_p)}</code> (-{sl_pct:.1f}%)\n"
-                                f"📌 {pat[:35]}\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📋 Milestone Plan:\n"
-                                f"  +10% → Move SL to {sl_10}\n"
-                                f"  +20% → Move SL to {sl_20}\n"
-                                f"  +35% → Move SL to {sl_35}\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"✏️ Set your trade on CoinDCX now!"
-                            )
-                            del pending_signals[coin]
-                            logger.info(f"ACTIVATED: {coin}|{dirn}|Entry:{ep}|{lev}x")
-                        else:
-                            send_telegram(f"⏰ <b>{BOT_HEADER}</b> Signal for <b>{coin}</b> expired.")
-                            logger.warning(f"ACTIVATE failed: {coin} not in pending")
-
-                    elif action == "IGNORE":
-                        if coin in pending_signals:
-                            del pending_signals[coin]
-                        send_telegram(f"❌ <b>{BOT_HEADER}</b> Signal ignored: <b>{coin}</b>")
-                        logger.info(f"IGNORED: {coin}")
+                                send_telegram(f"⏰ <b>{BOT_HEADER}</b> Signal for <b>{coin}</b> expired.")
+                                logger.warning(f"ACTIVATE failed: {coin} not in pending")
+                        elif action == "IGNORE":
+                            if coin in pending_signals:
+                                del pending_signals[coin]
+                            send_telegram(f"❌ <b>{BOT_HEADER}</b> {coin} signal ignored.")
+                            logger.info(f"IGNORED: {coin}")
 
                 # ── TEXT COMMANDS ─────────────────────────────────────────
                 elif "message" in update:
