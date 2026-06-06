@@ -17,8 +17,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -359,6 +359,55 @@ def calculate_vwap(klines):
         total_vol = sum(float(k[5]) for k in klines)
         return total_pv / total_vol if total_vol > 0 else None
     except Exception: return None
+
+
+def get_dol_signal(klines: list) -> str:
+    """
+    DOL — Direction of Liquidity indicator.
+    Identifies where smart money / liquidity is being hunted.
+    Looks for:
+    - Equal highs (liquidity above) → likely sweep up then reverse down
+    - Equal lows (liquidity below)  → likely sweep down then reverse up
+    - Recent wick rejection         → liquidity already swept
+    Returns signal hint for the trader.
+    """
+    try:
+        highs  = [float(k[2]) for k in klines[-30:]]
+        lows   = [float(k[3]) for k in klines[-30:]]
+        closes = [float(k[4]) for k in klines[-30:]]
+        price  = closes[-1]
+
+        # Check for equal highs (within 0.3%)
+        recent_highs = highs[-10:]
+        max_high     = max(recent_highs)
+        equal_highs  = sum(1 for h in recent_highs if abs(h - max_high) / max_high < 0.003)
+
+        # Check for equal lows (within 0.3%)
+        recent_lows = lows[-10:]
+        min_low     = min(recent_lows)
+        equal_lows  = sum(1 for l in recent_lows if abs(l - min_low) / min_low < 0.003)
+
+        # Check last candle wick rejection
+        last_body   = abs(closes[-1] - float(klines[-1][1]))
+        last_range  = highs[-1] - lows[-1]
+        upper_wick  = highs[-1] - max(closes[-1], float(klines[-1][1]))
+        lower_wick  = min(closes[-1], float(klines[-1][1])) - lows[-1]
+        wick_ratio  = upper_wick / last_range if last_range > 0 else 0
+
+        if equal_highs >= 3 and equal_lows < 2:
+            return "🔴 Liquidity ABOVE — Smart money may sweep highs then sell"
+        elif equal_lows >= 3 and equal_highs < 2:
+            return "🟢 Liquidity BELOW — Smart money may sweep lows then buy"
+        elif wick_ratio > 0.6:
+            return "🔴 Upper wick rejection — Sellers defending highs"
+        elif lower_wick > last_range * 0.6:
+            return "🟢 Lower wick rejection — Buyers defending lows"
+        elif equal_highs >= 2 and equal_lows >= 2:
+            return "🟡 Liquidity both sides — Consolidation / ranging"
+        else:
+            return "➖ No clear liquidity imbalance"
+    except Exception:
+        return "➖ DOL N/A"
 
 def detect_rsi_divergence(closes):
     if len(closes) < 10: return None
@@ -1306,6 +1355,8 @@ def format_and_send(setup, coin, is_river=False, is_instant=False, market_condit
     whale_status = "✅" if whale else "❌"
     msg += f"  🌀 SuperTrend: {st_status}  |  VWAP: {vwap_label}\n"
     msg += f"  📦 OI: {oi_label}  |  🐋 Whale: {whale_status}\n"
+    dol_signal = get_dol_signal(klines_15m)
+    msg += f"  💧 DOL: {dol_signal}\n"
     if zone_ok:
         zone_type = "demand" if direction == "BUY" else "supply"
         msg += f"  📍 Zone: ✅ In {zone_type} zone {zone_label}\n"
@@ -1617,6 +1668,8 @@ def cmd_trend(symbol_input: str) -> str:
     rsi_1h = results[3][2] if len(results) > 3 else 50
     adx_1h = results[3][3] if len(results) > 3 else 0
     rsi_lbl = "Overbought ⚠️" if rsi_1h > 70 else "Oversold ⚠️" if rsi_1h < 30 else "Normal ✅"
+    klines_dol = get_klines(symbol, "1h", 35)
+    dol_trend  = get_dol_signal(klines_dol) if klines_dol else "➖ N/A"
     msg += f"  RSI (1h): {rsi_1h:.1f} {rsi_lbl}\n"
     msg += f"  ADX (1h): {adx_1h:.1f} {'Strong' if adx_1h > 25 else 'Weak'} trend\n"
     msg += f"{'─'*34}\n"
@@ -1906,20 +1959,27 @@ def get_patterns_ranked_text() -> str:
 
 # ================= BUTTON MENU =================
 def send_menu():
-    """Sends a beautiful tap-button command menu to Telegram."""
+    """Simple text menu - no keyboard markup to avoid interfering with signal buttons."""
     send_telegram(
-        f"📱 <b>{BOT_HEADER}</b>\n"
-        f"Tap any button below:",
-        reply_markup={
-            "keyboard": [
-                [{"text": "📊 Trades"},    {"text": "⏳ Pending"},   {"text": "📈 Stats"}],
-                [{"text": "📅 Summary"},   {"text": "🔥 Streak"},    {"text": "⭐ Best"}],
-                [{"text": "🛡️ Risk"},      {"text": "🧠 Learn"},     {"text": "📋 Journal"}],
-                [{"text": "📰 News"},      {"text": "🌍 Market"},    {"text": "🔍 Scan"}],
-                [{"text": "📊 Patterns"},  {"text": "⚙️ CB Status"}, {"text": "❓ Help"}],
-            ],
-            "resize_keyboard": True,
-        }
+        f"📱 <b>{BOT_HEADER} COMMANDS</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 /trades    — Active trades\n"
+        f"⏳ /pending   — Pending signals\n"
+        f"📈 /stats     — Pattern stats\n"
+        f"📅 /summary   — 10 day summary\n"
+        f"🔥 /streak    — Win/loss streak\n"
+        f"⭐ /best      — Top performers\n"
+        f"🛡️ /risk      — Risk exposure\n"
+        f"🧠 /learn     — Bot insights\n"
+        f"📋 /journal   — Trade journal\n"
+        f"📰 /news      — Crypto news\n"
+        f"🌍 /market    — Market overview\n"
+        f"🔍 /scan      — Manual scan\n"
+        f"📊 /patterns  — All patterns ranked\n"
+        f"📈 /trend BTC — Trend analysis\n"
+        f"🔀 /compare BTC ETH SOL\n"
+        f"⚙️ /cb        — Circuit breaker\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
 # ================= TELEGRAM POLLING =================
@@ -2036,6 +2096,8 @@ def cmd_trend(symbol_input: str) -> str:
     rsi_1h = results[3][2] if len(results) > 3 else 50
     adx_1h = results[3][3] if len(results) > 3 else 0
     rsi_lbl = "Overbought ⚠️" if rsi_1h > 70 else "Oversold ⚠️" if rsi_1h < 30 else "Normal ✅"
+    klines_dol = get_klines(symbol, "1h", 35)
+    dol_trend  = get_dol_signal(klines_dol) if klines_dol else "➖ N/A"
     msg += f"  RSI (1h): {rsi_1h:.1f} {rsi_lbl}\n"
     msg += f"  ADX (1h): {adx_1h:.1f} {'Strong' if adx_1h > 25 else 'Weak'} trend\n"
     msg += f"{'─'*34}\n"
@@ -2773,9 +2835,7 @@ def main():
         f"📌 Type /help for all commands"
     )
     logger.info(f"{BOT_NAME} {BOT_VERSION} started | {len(COINS)} coins | Score: {MIN_SETUP_SCORE}+")
-    # Send tap-button menu on startup
-    time.sleep(2)
-    send_menu()
+    # Menu available via /menu command
     while True:
         try:
             btc_price  = get_price("BTCUSDT")
