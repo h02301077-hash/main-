@@ -15,8 +15,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -186,6 +186,37 @@ def load_alerts():
         if os.path.exists("alerts.json"):
             with open("alerts.json") as f: price_alerts=json.load(f)
     except Exception as e: logger.error(f"load_alerts: {e}")
+
+def save_pending_signals():
+    try:
+        serialized={}
+        for coin,sig in list(pending_signals.items()):
+            s=dict(sig)
+            if isinstance(s.get("timestamp"),datetime): s["timestamp"]=s["timestamp"].isoformat()
+            if isinstance(s.get("expires_at"),datetime): s["expires_at"]=s["expires_at"].isoformat()
+            serialized[coin]=s
+        with open("pending_signals.json","w") as f: json.dump(serialized,f)
+    except Exception as e: logger.error(f"save_pending_signals: {e}")
+
+def load_pending_signals():
+    global pending_signals
+    try:
+        if os.path.exists("pending_signals.json"):
+            with open("pending_signals.json") as f: data=json.load(f)
+            now=get_ist_datetime()
+            for coin,sig in data.items():
+                if sig.get("expires_at"):
+                    try:
+                        exp=datetime.fromisoformat(sig["expires_at"])
+                        if now>exp: continue
+                        sig["expires_at"]=exp
+                    except Exception: continue
+                if sig.get("timestamp"):
+                    try: sig["timestamp"]=datetime.fromisoformat(sig["timestamp"])
+                    except Exception: pass
+                pending_signals[coin]=sig
+            logger.info(f"Loaded {len(pending_signals)} pending signals from disk.")
+    except Exception as e: logger.error(f"load_pending_signals: {e}")
 
 def save_circuit_breaker():
     try:
@@ -1138,42 +1169,50 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     if is_instant: sig_type="INSTANT SIGNAL"
     elif is_river: sig_type="RIVER SIGNAL"
     else:          sig_type="VERIFIED SETUP"
-    msg =f"🔥 <b>{sig_type} - {coin}</b>\n"
-    msg+=f"<b>{BOT_HEADER}</b>\n"
-    msg+=f"{S()}\n"
-    msg+=f"<b>{dir_em}</b> | Leverage: <b>{lev}x</b> | {cond_em}\n"
-    msg+=f"Grade: <b>{grade}</b> | Score: <b>{setup['setup_score']:.0f}/100</b>\n"
-    msg+=f"{S()}\n"
-    msg+=f"Entry:   <code>{format_price(entry)}</code>\n"
-    msg+=f"Target:  <code>{format_price(tp)}</code>  (+{tp_pct:.2f}%)\n"
-    msg+=f"Stop:    <code>{format_price(sl)}</code>  (-{sl_pct:.2f}%)\n"
-    msg+=f"Profit:  <b>{profit_target:.1f}%</b> | RR: <b>1:{rr_ratio:.1f}</b>\n"
-    msg+=f"Size:    <b>{pos_size:.0f}% of capital</b>\n"
-    msg+=f"{S()}\n"
-    msg+=f"Pattern: {setup['pattern']}\n"
-    msg+=f"RSI: {rsi_val:.1f} | ADX: {adx_val:.1f} | Mom: {mom:+.2f}%\n"
-    msg+=f"TF: {tf_label}\n"
-    msg+=f"SuperTrend: {'Confirmed' if st_ok else 'Mixed'} ({st_15m}/{st_1h})\n"
-    msg+=f"VWAP: {vwap_label}\n"
-    msg+=f"OI: {oi_label} | Whale: {'Yes' if whale else 'No'}\n"
-    if zone_ok: msg+=f"Zone: In {'demand' if setup['direction']=='BUY' else 'supply'} zone\n"
-    if div=="BULLISH_DIV": msg+=f"RSI Divergence: Bullish\n"
-    elif div=="BEARISH_DIV": msg+=f"RSI Divergence: Bearish\n"
-    msg+=f"DOL: {dol}\n"
-    msg+=f"{S()}\n"
-    msg+=f"ETA: ~{eta} mins | Expires: {expiry_str}\n"
-    msg+=f"ATR(1h): {format_price(atr_1h)}\n"
-    msg+=f"{S()}\n"
-    msg+=f"Milestone Plan:\n"
+    dir_arrow = "🟢 LONG" if setup["direction"]=="BUY" else "🔴 SHORT"
+    grade_em  = "🏆" if "A+" in grade else "⭐" if " A" in grade else "✅" if "B" in grade else "⚠️"
+    cond_icon = "📈" if market_condition=="bull" else "📉" if market_condition=="bear" else "➡️"
+
     if setup["direction"]=="BUY":
-        msg+=f"  +10% - Move SL to {format_price(entry)}\n"
-        msg+=f"  +20% - Move SL to {format_price(entry+(tp-entry)*0.5)}\n"
-        msg+=f"  +35% - Move SL to {format_price(entry+(tp-entry)*0.75)}\n"
+        ms10=format_price(entry); ms20=format_price(entry+(tp-entry)*0.5); ms35=format_price(entry+(tp-entry)*0.75)
     else:
-        msg+=f"  +10% - Move SL to {format_price(entry)}\n"
-        msg+=f"  +20% - Move SL to {format_price(entry-(entry-tp)*0.5)}\n"
-        msg+=f"  +35% - Move SL to {format_price(entry-(entry-tp)*0.75)}\n"
-    msg+=f"{S()}\n{get_ist_time()}"
+        ms10=format_price(entry); ms20=format_price(entry-(entry-tp)*0.5); ms35=format_price(entry-(entry-tp)*0.75)
+
+    msg  = f"{'⚡' if is_instant else '🔥'} <b>{sig_type}</b>\n"
+    msg += f"⚙️ <b>TRADING SIGNAL MASTER v32G</b>\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"🪙 <b>{coin}</b>  {dir_arrow}  🔧 <b>{lev}x</b>\n"
+    msg += f"{grade_em} <b>{grade}</b>  •  Score: <b>{setup['setup_score']:.0f}/100</b>\n"
+    msg += f"{cond_icon} {cond_em} Market\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"💰 <b>Entry</b>    <code>{format_price(entry)}</code>\n"
+    msg += f"🎯 <b>Target</b>   <code>{format_price(tp)}</code>  <i>(+{tp_pct:.2f}%)</i>\n"
+    msg += f"🛑 <b>Stop</b>     <code>{format_price(sl)}</code>  <i>(-{sl_pct:.2f}%)</i>\n\n"
+    msg += f"📈 Profit: <b>{profit_target:.1f}%</b>  •  RR: <b>1:{rr_ratio:.1f}</b>\n"
+    msg += f"💼 Size: <b>{pos_size:.0f}% of capital</b>\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    msg += f"📌 <b>Pattern:</b> {setup['pattern']}\n"
+    msg += f"📊 RSI: {rsi_val:.1f}  ADX: {adx_val:.1f}  Mom: {mom:+.2f}%\n"
+    msg += f"📡 TF: {tf_label}\n"
+    st_icon = "✅" if st_ok else "⚠️"
+    msg += f"🌀 SuperTrend: {st_icon} ({st_15m}/{st_1h})  VWAP: {vwap_label}\n"
+    oi_icon = "✅" if oi_rising else "⚠️" if oi_rising is False else "➖"
+    whale_icon = "✅" if whale else "❌"
+    msg += f"📦 OI: {oi_icon} {oi_label}  🐋 Whale: {whale_icon}\n"
+    if zone_ok: msg += f"📍 Zone: ✅ In {'demand' if setup['direction']=='BUY' else 'supply'} zone\n"
+    if div=="BULLISH_DIV":  msg += f"📊 RSI Divergence: 🟢 Bullish\n"
+    elif div=="BEARISH_DIV": msg += f"📊 RSI Divergence: 🔴 Bearish\n"
+    msg += f"💧 DOL: {dol}\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"⏳ ETA: ~{eta} mins  •  ⏰ Expires: {expiry_str}\n"
+    msg += f"✏️ ATR(1h): {format_price(atr_1h)}\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"📋 <b>Milestone Plan:</b>\n"
+    msg += f"  🎯 +10% → Move SL to <code>{ms10}</code>\n"
+    msg += f"  🎯 +20% → Move SL to <code>{ms20}</code>\n"
+    msg += f"  🚀 +35% → Move SL to <code>{ms35}</code>\n"
+    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg += f"🕐 {get_ist_time()}"
     setup.update({"entry":entry,"sl":sl,"tp":tp,"timestamp":get_ist_datetime(),
                   "expires_at":expiry_time,"reversal_alerted":False,"breakeven_sent":False,
                   "partial_tp_taken":False,"milestones_sent":[],"tf_score":tf_score,
@@ -1187,6 +1226,7 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     if result:
         sent_coins.append(coin)
         coin_cooldowns[coin]=get_ist_datetime()+timedelta(minutes=eta)
+        save_pending_signals()
         logger.info(f"Signal sent: {coin}|{setup['direction']}|Score:{setup['setup_score']}|ETA:{eta}m")
         return True
     else:
@@ -1241,9 +1281,19 @@ def check_active_trades():
                     "duration":duration,"tf_score":trade.get("tf_score",0),"market_condition":mc})
                 save_journal(); learn_from_trade(coin,primary,hit,pnl,mc,trade.get("tf_score",0))
             em="✅" if hit=="WIN" else "🛑"
-            send_telegram(f"{em} <b>{BOT_HEADER} {coin} {hit}</b>\n{S()}\n"
-                          f"Entry: {format_price(trade['entry'])} to Exit: {format_price(price)}\n"
-                          f"Pattern: {primary} | Duration: {duration}\nPnL: {fmt_pnl(pnl)}")
+            send_telegram(
+                f"{em} <b>TRADE {'WON' if hit=='WIN' else 'CLOSED'} — {coin}</b>\n"
+                f"⚙️ <b>TRADING SIGNAL MASTER v32G</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🪙 <b>{coin}</b>  {'🟢' if trade['direction']=='BUY' else '🔴'} {trade['direction']}\n"
+                f"📌 Pattern: {primary}\n\n"
+                f"💰 Entry: <code>{format_price(trade['entry'])}</code>\n"
+                f"📍 Exit:  <code>{format_price(price)}</code>\n"
+                f"⏱️ Duration: {duration}\n\n"
+                f"📈 <b>PnL: {fmt_pnl(pnl)}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🕐 {get_ist_time()}"
+            )
             del active_trades[coin]; save_active_trades(); save_trade_history()
 
 def poll_telegram():
@@ -1289,30 +1339,35 @@ def poll_telegram():
                                     sl_10=format_price(ep); sl_20=format_price(ep+(tp_p-ep)*0.5); sl_35=format_price(ep+(tp_p-ep)*0.75)
                                 else:
                                     sl_10=format_price(ep); sl_20=format_price(ep-(ep-tp_p)*0.5); sl_35=format_price(ep-(ep-tp_p)*0.75)
+                                dir_em2 = "🟢 LONG" if dirn=="BUY" else "🔴 SHORT"
                                 send_telegram(
-                                    f"🚀 <b>{BOT_HEADER} {coin} ACTIVATED</b>\n"
-                                    f"{S()}\n"
-                                    f"{dirn} | {lev}x | RR 1:{rr}\n"
-                                    f"Entry:  {format_price(ep)}\n"
-                                    f"Target: {format_price(tp_p)} (+{tp_pct:.1f}%)\n"
-                                    f"Stop:   {format_price(sl_p)} (-{sl_pct:.1f}%)\n"
-                                    f"Pattern: {pat}\n"
-                                    f"{S()}\n"
-                                    f"Milestone Plan:\n"
-                                    f"+10% Move SL to {sl_10}\n"
-                                    f"+20% Move SL to {sl_20}\n"
-                                    f"+35% Move SL to {sl_35}\n"
-                                    f"{S()}\n"
-                                    f"Set your trade on CoinDCX now!\n"
-                                    f"{get_ist_time()}"
+                                    f"🚀 <b>TRADE ACTIVATED</b>\n"
+                                    f"⚙️ <b>TRADING SIGNAL MASTER v32G</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                                    f"🪙 <b>{coin}</b>  {dir_em2}  🔧 <b>{lev}x</b>\n"
+                                    f"⚖️ Risk/Reward: <b>1:{rr}</b>\n\n"
+                                    f"💰 <b>Entry</b>    <code>{format_price(ep)}</code>\n"
+                                    f"🎯 <b>Target</b>   <code>{format_price(tp_p)}</code>  (+{tp_pct:.1f}%)\n"
+                                    f"🛑 <b>Stop</b>     <code>{format_price(sl_p)}</code>  (-{sl_pct:.1f}%)\n\n"
+                                    f"📌 Pattern: {pat}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📋 <b>Milestone Plan:</b>\n"
+                                    f"  🎯 +10% → Move SL to <code>{sl_10}</code>\n"
+                                    f"  🎯 +20% → Move SL to <code>{sl_20}</code>\n"
+                                    f"  🚀 +35% → Move SL to <code>{sl_35}</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"✏️ Set your trade on CoinDCX now!\n"
+                                    f"🕐 {get_ist_time()}"
                                 )
                                 del pending_signals[coin]
+                                save_pending_signals()
                                 logger.info(f"ACTIVATED: {coin}|{dirn}|Entry:{ep}|{lev}x")
                             else:
                                 send_telegram(f"⏰ <b>{BOT_HEADER}</b>\nSignal for {coin} expired.\nWait for next signal.")
                                 logger.warning(f"ACTIVATE failed: {coin} not in pending={list(pending_signals.keys())}")
                         elif action=="IGNORE":
                             if coin in pending_signals: del pending_signals[coin]
+                            save_pending_signals()
                             send_telegram(f"❌ <b>{BOT_HEADER}</b>\n{coin} signal ignored.")
                 elif "message" in update:
                     txt=update["message"].get("text","").strip().lower()
@@ -1546,22 +1601,41 @@ def main():
     global last_batch_time,last_river_time,last_hourly_time,last_pnl_update_time,last_weekly_report_day
     load_active_trades(); load_trade_history(); load_journal()
     load_learning(); load_alerts(); load_circuit_breaker()
+    load_pending_signals()
     threading.Thread(target=poll_telegram,daemon=True).start()
     logger.info(f"{BOT_NAME} {BOT_VERSION} starting...")
     send_telegram(
-        f"<b>{BOT_NAME} {BOT_VERSION}</b>\n"
-        f"Smart - Fast - Accurate - AI\n"
-        f"{S()}\n\n"
-        f"Scanner: {len(COINS)} coins\n"
-        f"Min Score: {MIN_SETUP_SCORE}\n"
-        f"ADX Min: {ADX_MIN_TREND}\n"
-        f"Expiry: {SIGNAL_EXPIRY_MINUTES} mins\n"
-        f"Circuit Breaker: losses under -5% only\n"
-        f"ETA-based cooldown per coin\n"
-        f"All filters active\n"
-        f"{S()}\n"
-        f"Type /help for commands\n"
-        f"{get_ist_time()}"
+        f"🚀 <b>TRADING SIGNAL MASTER v32G</b> 🚀\n"
+        f"<i>Smart • Fast • Accurate • AI</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>✅ All Systems Active</b>\n\n"
+        f"🔍 Scanner: <b>{len(COINS)} coins</b>\n"
+        f"📊 4h + 1h Trend Filter\n"
+        f"🌀 SuperTrend (15m + 1h)\n"
+        f"📈 ADX Min: <b>{ADX_MIN_TREND}</b>\n"
+        f"💧 DOL Liquidity Indicator\n"
+        f"📍 Supply & Demand Zones\n"
+        f"📊 VWAP Institutional Filter\n"
+        f"🔀 RSI Divergence Detection\n"
+        f"🐋 Whale Detection\n"
+        f"😱 Fear & Greed Index\n"
+        f"💰 Funding Rate + OI\n"
+        f"🛡️ Circuit Breaker (≤ -5% only)\n"
+        f"🔄 CB Auto-Reset Midnight IST\n"
+        f"⚡ Instant Signals ≥ {INSTANT_SIGNAL_THRESHOLD}\n"
+        f"🎯 Smart Position Sizing\n"
+        f"🏆 Signal Grading A+/A/B/C\n"
+        f"📋 Profit Milestones +10/20/35%\n"
+        f"🧠 AI Pattern Learning\n"
+        f"⏱️ ETA-Based Coin Cooldown\n"
+        f"🌙 Dead Session (2AM-7AM IST)\n"
+        f"📰 Live Crypto News\n"
+        f"📊 Backtest Engine\n"
+        f"🗓️ Weekly AI Insight\n"
+        f"🎯 Min Score: <b>{MIN_SETUP_SCORE}</b>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 Type /help for all commands\n"
+        f"🕐 {get_ist_time()}"
     )
     while True:
         try:
