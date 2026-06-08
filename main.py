@@ -15,8 +15,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -74,8 +74,8 @@ last_weekly_report_day = None
 SCAN_INTERVAL            = 300
 BATCH_INTERVAL           = 1800
 RIVER_INTERVAL           = 900
-MIN_SETUP_SCORE          = 90
-MIN_PRIMARY_SCORE        = 82
+MIN_SETUP_SCORE          = 75
+MIN_PRIMARY_SCORE        = 75
 INSTANT_SIGNAL_THRESHOLD = 97
 MIN_PROFIT_TARGET        = 15.0
 SIGNAL_EXPIRY_MINUTES    = 120
@@ -432,31 +432,48 @@ def get_smart_leverage(symbol,atr_pct,score):
     return min(bl+bonus,hc)
 
 def get_signal_grade(score,whale,oi_rising,tf_score,vol_ok,rsi_ok,funding_ok,st_ok,vwap_ok,zone_ok,adx_val):
+    breakdown=[]
     pts=0
-    if score>=98:    pts+=3
-    elif score>=96:  pts+=2
-    else:            pts+=1
-    if whale:        pts+=2
-    if oi_rising:    pts+=2
-    if tf_score==3:  pts+=2
-    elif tf_score==2:pts+=1
-    if vol_ok:       pts+=1
-    if rsi_ok:       pts+=1
-    if funding_ok:   pts+=1
-    if st_ok:        pts+=2
-    if vwap_ok:      pts+=1
-    if zone_ok:      pts+=2
-    if adx_val>=35:  pts+=1
-    if pts>=14:      return "Grade A+"
-    elif pts>=11:    return "Grade A"
-    elif pts>=8:     return "Grade B"
-    else:            return "Grade C"
+    # Score points
+    if score>=98:    pts+=3; breakdown.append(("🎯 Score ≥98",      3))
+    elif score>=96:  pts+=2; breakdown.append(("🎯 Score ≥96",      2))
+    elif score>=92:  pts+=2; breakdown.append(("🎯 Score ≥92",      2))
+    elif score>=85:  pts+=1; breakdown.append(("🎯 Score ≥85",      1))
+    else:                    breakdown.append(("🎯 Score",           0))
+    # Confluence points
+    if whale:        pts+=2; breakdown.append(("🐋 Whale Activity",  2))
+    else:                    breakdown.append(("🐋 Whale Activity",  0))
+    if oi_rising:    pts+=2; breakdown.append(("📦 OI Rising",       2))
+    else:                    breakdown.append(("📦 OI",              0))
+    if tf_score==3:  pts+=2; breakdown.append(("📡 4h+1h Aligned",  2))
+    elif tf_score==2:pts+=1; breakdown.append(("📡 4h Aligned",     1))
+    else:                    breakdown.append(("📡 TF Alignment",    0))
+    if vol_ok:       pts+=1; breakdown.append(("📊 Volume Confirm",  1))
+    else:                    breakdown.append(("📊 Volume",          0))
+    if rsi_ok:       pts+=1; breakdown.append(("📈 RSI Valid",       1))
+    else:                    breakdown.append(("📈 RSI",             0))
+    if funding_ok:   pts+=1; breakdown.append(("💸 Funding OK",      1))
+    else:                    breakdown.append(("💸 Funding",         0))
+    if st_ok:        pts+=2; breakdown.append(("🌀 SuperTrend ✓✓",  2))
+    else:                    breakdown.append(("🌀 SuperTrend",      0))
+    if vwap_ok:      pts+=1; breakdown.append(("💧 VWAP Confirm",    1))
+    else:                    breakdown.append(("💧 VWAP",            0))
+    if zone_ok:      pts+=2; breakdown.append(("📍 S/D Zone Hit",    2))
+    else:                    breakdown.append(("📍 S/D Zone",        0))
+    if adx_val>=35:  pts+=1; breakdown.append(("💪 ADX Strong",      1))
+    else:                    breakdown.append(("💪 ADX",             0))
+    if pts>=14:   grade="Grade A+"
+    elif pts>=11: grade="Grade A"
+    elif pts>=8:  grade="Grade B"
+    else:         grade="Grade C"
+    return grade, pts, breakdown
 
 def get_position_size_pct(grade):
-    if "A+" in grade: return 10.0
-    elif "A" in grade: return 7.0
-    elif "B" in grade: return 5.0
-    else:              return 3.0
+    g=grade[0] if isinstance(grade,tuple) else grade
+    if "A+" in g: return 10.0
+    elif "A" in g: return 7.0
+    elif "B" in g: return 5.0
+    else:          return 3.0
 
 def is_volume_confirmed(klines):
     vols=[float(k[5]) for k in klines]
@@ -743,152 +760,51 @@ def run_backtest(symbol):
     except Exception as e: return f"Backtest failed: {e}"
 
 def get_active_trades_text():
-    if not active_trades:
-        return (
-            "┌─────────────────────────────────┐\n"
-            "│   📊  ACTIVE TRADES MONITOR     │\n"
-            "└─────────────────────────────────┘\n\n"
-            "  ⚪  No active trades right now.\n\n"
-            f"  🛡️ Circuit Breaker : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
-            f"  ⏳ Pending Signals  : {len(pending_signals)}\n"
-            f"  🕐 {get_ist_time()}"
-        )
-    now=get_ist_datetime()
-    lines=[]
-    total_pnl=0.0
+    if not active_trades: return f"<b>{BOT_HEADER}</b>\nNo active trades."
+    text=f"<b>{BOT_HEADER} Active Trades ({len(active_trades)})</b>\n{S()}\n\n"
     for coin,t in active_trades.items():
-        price=get_price(t.get("symbol",coin+"USDT"))
-        sl_pct=abs(t["entry"]-t["sl"])/t["entry"]*100
-        tp_pct=abs(t["tp"]-t["entry"])/t["entry"]*100
-        rr=round(tp_pct/sl_pct,1) if sl_pct>0 else 0
-        dirn=t.get("direction","?"); lev=t.get("leverage",1)
-        pat=t.get("pattern","?").split(" + ")[0]
-        dir_em="🟢 LONG" if dirn=="BUY" else "🔴 SHORT"
-        dur_txt=""
-        if t.get("timestamp"):
-            try:
-                mins=int((now-t["timestamp"]).total_seconds()/60)
-                dur_txt=f"{mins}m" if mins<60 else f"{mins//60}h {mins%60}m"
-            except Exception: pass
-        if price:
-            pnl=((price-t["entry"])/t["entry"])*100*lev if dirn=="BUY" else ((t["entry"]-price)/t["entry"])*100*lev
-            total_pnl+=pnl
-            pnl_txt=fmt_pnl(pnl)
-        else:
-            pnl_txt="⏳ Loading"
-        ms=t.get("milestones_sent",[])
-        ms_txt="🚀 +35% reached" if "p35" in ms else "🔥 +20% reached" if "p20" in ms else "✅ +10% reached" if "p10" in ms else ""
-        partial="  💰 Partial TP taken" if t.get("partial_tp_taken") else ""
-        block =(f"  ┌──────────────────────────────\n"
-                f"  │  🪙 <b>{coin}</b>  {dir_em}  🔧 {lev}x\n"
-                f"  │  💰 Entry  : <code>{format_price(t['entry'])}</code>\n"
-                f"  │  🎯 Target : <code>{format_price(t['tp'])}</code>  (+{tp_pct:.2f}%)\n"
-                f"  │  🛑 Stop   : <code>{format_price(t['sl'])}</code>  (-{sl_pct:.2f}%)\n"
-                f"  │  ⚖️  RR 1:{rr}  ⏱️ {dur_txt or 'just started'}\n"
-                f"  │  📈 Live PnL : {pnl_txt}{partial}\n")
-        if ms_txt: block+=f"  │  {ms_txt}\n"
-        block+=f"  │  📌 {pat}\n  └──────────────────────────────"
-        lines.append(block)
-    header=(f"┌─────────────────────────────────┐\n"
-            f"│  📊  ACTIVE TRADES  ({len(active_trades)}/{MAX_ACTIVE_TRADES})         │\n"
-            f"└─────────────────────────────────┘\n\n")
-    footer=(f"\n\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"  💼 Portfolio PnL : {fmt_pnl(total_pnl)}\n"
-            f"  🛡️ Circuit Breaker : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
-            f"  ⏳ Pending : {len(pending_signals)}\n"
-            f"  🕐 {get_ist_time()}")
-    return header+"\n\n".join(lines)+footer
+        sl_pct=abs(t['entry']-t['sl'])/t['entry']*100; tp_pct=abs(t['tp']-t['entry'])/t['entry']*100
+        text+=f"🔹 <b>{coin}</b> {t['direction']} | {t['leverage']}x\n"
+        text+=f"   Entry: {format_price(t['entry'])}\n"
+        text+=f"   TP: {format_price(t['tp'])} (+{tp_pct:.1f}%) | SL: {format_price(t['sl'])} (-{sl_pct:.1f}%)\n\n"
+    return text
 
 def get_pattern_stats_text():
-    tw=sum(s["wins"] for s in pattern_stats.values())
-    tl=sum(s["losses"] for s in pattern_stats.values())
-    ts=sum(s["signals"] for s in pattern_stats.values())
-    owr=(tw/ts*100) if ts>0 else 0
-    tp_=sum(s["total_pnl"] for s in pattern_stats.values())
-    text=(f"┌────────────────────────────────────┐\n"
-          f"│  📈  PATTERN PERFORMANCE           │\n"
-          f"└────────────────────────────────────┘\n\n"
-          f"  🔢 Total Signals : {ts}\n"
-          f"  ✅ Wins          : {tw}\n"
-          f"  ❌ Losses        : {tl}\n"
-          f"  🎯 Overall WR    : <b>{owr:.1f}%</b>\n"
-          f"  💰 Total PnL     : {fmt_pnl(tp_)}\n\n"
-          f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
-    for pat,s in sorted(pattern_stats.items(),key=lambda x:x[1]["signals"],reverse=True):
+    text=f"<b>{BOT_HEADER} Pattern Performance</b>\n{S()}\n\n"
+    for pat,s in sorted(pattern_stats.items(),key=lambda x:x[1]["signals"],reverse=True)[:10]:
         if s["signals"]>0:
-            wr=(s["wins"]/s["signals"])*100
-            filled=int(wr/10); bar="█"*filled+"░"*(10-filled)
-            flag="🔴" if wr<40 else "🟡" if wr<60 else "🟢"
-            susp=" 🔒 SUSPENDED" if is_pattern_suspended(pat) else ""
-            w=s.get("weight",1.0); wtxt=f"📈{w:.1f}x" if w>1.05 else f"📉{w:.1f}x" if w<0.95 else "━"
-            text+=(f"  {flag} <b>{pat}</b>{susp}\n"
-                   f"  [{bar}] {wr:.1f}% | {s['signals']} trades | {wtxt}\n"
-                   f"  {s['wins']}W / {s['losses']}L  •  {fmt_pnl(s['total_pnl'])}\n\n")
-    text+=f"  🕐 {get_ist_time()}"
+            wr=(s["wins"]/s["signals"])*100; flag="🔴" if wr<40 else "🟡" if wr<60 else "🟢"
+            susp=" SUSPENDED" if is_pattern_suspended(pat) else ""
+            text+=f"{flag} <b>{pat}</b>{susp}\nSignals:{s['signals']} WR:{wr:.1f}% PnL:{fmt_pnl(s['total_pnl'])}\n\n"
     return text
 
 def get_10day_summary_text():
-    today=datetime.now(IST).date()
-    text=(f"┌────────────────────────────────────┐\n"
-          f"│  📅  10-DAY PERFORMANCE REPORT     │\n"
-          f"└────────────────────────────────────┘\n\n")
-    ow=ol=0; op=0.0; best_pnl=None; worst_pnl=None; best_ds=worst_ds=""
+    today=datetime.now(IST).date(); text=f"<b>{BOT_HEADER} Last 10 Days</b>\n{S()}\n\n"
+    ow=ol=0; op=0.0
     for days_ago in range(9,-1,-1):
-        day=today-timedelta(days=days_ago)
-        dt=[j for j in trade_journal if j.get("date")==str(day)]
+        day=today-timedelta(days=days_ago); dt=[j for j in trade_journal if j.get("date")==str(day)]
         w=sum(1 for t in dt if t["result"]=="WIN"); l=sum(1 for t in dt if t["result"]=="LOSS")
         total=w+l; pnl=sum(t["pnl"] for t in dt); wr=(w/total*100) if total>0 else 0
         ow+=w; ol+=l; op+=pnl; ds=day.strftime("%d %b")
-        if total==0:
-            text+=f"  ⚪ <b>{ds}</b>  ─  No trades\n"
+        if total==0: text+=f"⚪ <b>{ds}</b> - No trades\n"
         else:
             em="✅" if w>l else "❌" if l>w else "➖"
-            bar="█"*w+"░"*l
-            text+=f"  {em} <b>{ds}</b>  [{bar[:8]}]  {w}W/{l}L  {fmt_pnl(pnl)}\n"
-            if best_pnl is None or pnl>best_pnl: best_pnl=pnl; best_ds=ds
-            if worst_pnl is None or pnl<worst_pnl: worst_pnl=pnl; worst_ds=ds
+            text+=f"{em} <b>{ds}</b>: {w}W/{l}L WR:{wr:.0f}% {fmt_pnl(pnl)}\n"
     ot=ow+ol; owr=(ow/ot*100) if ot>0 else 0
-    text+=(f"\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-           f"  ✅ Wins     : {ow}\n"
-           f"  ❌ Losses   : {ol}\n"
-           f"  🎯 Win Rate : <b>{owr:.1f}%</b>\n"
-           f"  💰 Total PnL: {fmt_pnl(op)}\n"
-           f"  📊 Avg/Day  : {fmt_pnl(op/10)}\n")
-    if best_ds:  text+=f"  🏆 Best Day : {best_ds}  ({fmt_pnl(best_pnl)})\n"
-    if worst_ds: text+=f"  📉 Worst Day: {worst_ds}  ({fmt_pnl(worst_pnl)})\n"
-    text+=f"  🕐 {get_ist_time()}"
+    text+=f"\n{S()}\n10 Day Total: {ow}W {ol}L | WR:{owr:.1f}% | {fmt_pnl(op)}"
     return text
 
 def get_streak_text():
-    if not trade_journal:
-        return ("┌──────────────────────────────┐\n"
-                "│  🔥  STREAK TRACKER          │\n"
-                "└──────────────────────────────┘\n\n"
-                "  ⚪ No trades recorded yet.")
+    if not trade_journal: return f"<b>{BOT_HEADER}</b>\nNo trades yet."
     st=trade_journal[-1]["result"]; sc=0
     for t in reversed(trade_journal):
         if t["result"]==st: sc+=1
         else: break
-    total=len(trade_journal); wins=sum(1 for t in trade_journal if t["result"]=="WIN")
-    owr=(wins/total*100) if total>0 else 0
     em="🔥" if st=="WIN" else "❄️"
-    label="WINNING" if st=="WIN" else "LOSING"
-    bar=em*min(sc,10)
-    return (f"┌──────────────────────────────┐\n"
-            f"│  🔥  STREAK TRACKER          │\n"
-            f"└──────────────────────────────┘\n\n"
-            f"  {bar}\n\n"
-            f"  Current Streak : <b>{sc} {label}</b>\n"
-            f"  Total Trades   : {total}\n"
-            f"  Overall WR     : <b>{owr:.1f}%</b>\n\n"
-            f"  🕐 {get_ist_time()}")
+    return f"{em} <b>{BOT_HEADER} Streak</b>\n{'Winning' if st=='WIN' else 'Losing'}: {sc} trades"
 
 def get_best_text():
-    if not trade_journal:
-        return ("┌──────────────────────────────────┐\n"
-                "│  🏆  BEST PERFORMERS             │\n"
-                "└──────────────────────────────────┘\n\n"
-                "  ⚪ No trade data yet.")
+    if not trade_journal: return f"<b>{BOT_HEADER}</b>\nNo data yet."
     cs={}; ps2={}
     for t in trade_journal:
         c=t["coin"]
@@ -897,124 +813,64 @@ def get_best_text():
         p=t["pattern"]
         if p not in ps2: ps2[p]={"W":0,"L":0}
         ps2[p]["W" if t["result"]=="WIN" else "L"]+=1
-    sc=sorted(cs.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:5]
-    sp=sorted(ps2.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:5]
-    medals=["🥇","🥈","🥉","4️⃣","5️⃣"]
-    text=(f"┌──────────────────────────────────┐\n"
-          f"│  🏆  BEST PERFORMERS             │\n"
-          f"└──────────────────────────────────┘\n\n"
-          f"  💰 <b>Top Coins by Win Rate</b>\n\n")
-    for i,(c,s) in enumerate(sc,0):
+    text=f"<b>{BOT_HEADER} Best Performers</b>\n{S()}\n\nTop Coins:\n"
+    sc=sorted(cs.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:3]
+    for i,(c,s) in enumerate(sc,1):
         tot=s["W"]+s["L"]; wr=(s["W"]/tot*100) if tot>0 else 0
-        text+=f"  {medals[i]} <b>{c}</b>  {wr:.1f}% WR  ({tot} trades)  {fmt_pnl(s['pnl'])}\n"
-    text+=f"\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n  🌀 <b>Top Patterns by Win Rate</b>\n\n"
-    for i,(p,s) in enumerate(sp,0):
+        text+=f"{i}. <b>{c}</b> {wr:.1f}% WR {fmt_pnl(s['pnl'])}\n"
+    text+="\nTop Patterns:\n"
+    sp=sorted(ps2.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:3]
+    for i,(p,s) in enumerate(sp,1):
         tot=s["W"]+s["L"]; wr=(s["W"]/tot*100) if tot>0 else 0
-        text+=f"  {medals[i]} <b>{p}</b>  {wr:.1f}% WR  ({tot} trades)\n"
-    text+=f"\n  🕐 {get_ist_time()}"
+        text+=f"{i}. <b>{p}</b> {wr:.1f}% WR ({tot} trades)\n"
     return text
 
 def get_risk_text():
-    if not active_trades:
-        return (f"┌──────────────────────────────────┐\n"
-                f"│  🛡️  RISK EXPOSURE MONITOR       │\n"
-                f"└──────────────────────────────────┘\n\n"
-                f"  ⚪  No active trades — zero risk.\n\n"
-                f"  🛡️ CB : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
-                f"  📉 Daily Losses : {daily_losses}/{MAX_DAILY_LOSSES}\n"
-                f"  🕐 {get_ist_time()}")
-    text=(f"┌──────────────────────────────────┐\n"
-          f"│  🛡️  RISK EXPOSURE MONITOR       │\n"
-          f"└──────────────────────────────────┘\n\n")
-    total_risk=0.0
+    if not active_trades: return f"<b>{BOT_HEADER}</b>\nNo active trades."
+    text=f"<b>{BOT_HEADER} Risk Exposure</b>\n{S()}\n\n"; total_risk=0.0
     for coin,t in active_trades.items():
-        rp=abs(t["entry"]-t["sl"])/t["entry"]*100*t["leverage"]
-        tp_pct=abs(t["tp"]-t["entry"])/t["entry"]*100
-        sl_pct=abs(t["entry"]-t["sl"])/t["entry"]*100
-        total_risk+=rp
-        filled=min(int(rp/5),10); bar="█"*filled+"░"*(10-filled)
-        em="🔴" if rp>20 else "🟡" if rp>10 else "🟢"
-        text+=(f"  {em} <b>{coin}</b>  {t['direction']}  {t['leverage']}x\n"
-               f"  [{bar}] Max loss: {rp:.1f}%\n"
-               f"  SL dist: {sl_pct:.2f}%  TP dist: {tp_pct:.2f}%\n\n")
-    total_em="🔴" if total_risk>40 else "🟡" if total_risk>20 else "🟢"
-    text+=(f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-           f"  {total_em} Portfolio Risk : <b>{total_risk:.1f}%</b>\n"
-           f"  📌 Slots : {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
-           f"  🛡️ CB    : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
-           f"  📉 Losses: {daily_losses}/{MAX_DAILY_LOSSES}\n"
-           f"  ⏳ Pending: {len(pending_signals)}\n"
-           f"  🕐 {get_ist_time()}")
+        rp=abs(t["entry"]-t["sl"])/t["entry"]*100*t["leverage"]; total_risk+=rp
+        text+=f"{coin}: {rp:.1f}% max loss\n"
+    text+=f"\nTotal Risk: {total_risk:.1f}% | Active: {len(active_trades)}/{MAX_ACTIVE_TRADES}"
     return text
 
 def get_learning_text():
-    if not learning_notes:
-        return ("┌──────────────────────────────────┐\n"
-                "│  🧠  BOT LEARNING & INSIGHTS     │\n"
-                "└──────────────────────────────────┘\n\n"
-                "  ⚪ No insights yet — keep trading!")
-    text=(f"┌──────────────────────────────────┐\n"
-          f"│  🧠  BOT LEARNING & INSIGHTS     │\n"
-          f"└──────────────────────────────────┘\n\n"
-          f"  📊 <b>Market Memory</b>\n\n")
-    icons={"bull":"📈","bear":"📉","sideways":"➡️"}
+    if not learning_notes: return f"<b>{BOT_HEADER}</b>\nNo insights yet."
+    text=f"<b>{BOT_HEADER} Learning</b>\n{S()}\n\nMarket Memory:\n"
     for cond in ["bull","bear","sideways"]:
         mem=market_memory[cond]; tot=mem["wins"]+mem["losses"]
         wr=(mem["wins"]/tot*100) if tot>0 else 0
-        ic=icons.get(cond,"")
-        text+=(f"  {ic} <b>{cond.capitalize()}</b>  {mem['wins']}W/{mem['losses']}L  {wr:.1f}%\n"
-               f"     Best Pattern: {mem['best_pattern'] or 'N/A'}\n\n")
-    text+=(f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-           f"  💡 <b>Latest Insights</b>\n\n")
-    for note in learning_notes[-8:]:
-        text+=f"  • {note}\n"
-    text+=f"\n  🕐 {get_ist_time()}"
+        text+=f"  {cond}: {mem['wins']}W/{mem['losses']}L ({wr:.1f}%) Best:{mem['best_pattern'] or 'N/A'}\n"
+    text+=f"\nLatest Insights:\n"
+    for note in learning_notes[-8:]: text+=f"• {note}\n"
     return text
 
 def get_journal_text():
-    if not trade_journal:
-        return ("┌──────────────────────────────────┐\n"
-                "│  📓  TRADE JOURNAL               │\n"
-                "└──────────────────────────────────┘\n\n"
-                "  ⚪ No trades recorded yet.")
+    if not trade_journal: return f"<b>{BOT_HEADER}</b>\nNo trades yet."
     recent=trade_journal[-10:][::-1]
-    text=(f"┌──────────────────────────────────┐\n"
-          f"│  📓  TRADE JOURNAL (Last 10)     │\n"
-          f"└──────────────────────────────────┘\n\n")
+    text=f"<b>{BOT_HEADER} Trade Journal</b>\n{S()}\n\n"
     for t in recent:
         em="✅" if t.get("result")=="WIN" else "🔴"
-        dirn_em="🟢" if t.get("direction")=="BUY" else "🔴"
-        text+=(f"  {em} <b>{t.get('coin','?')}</b>  {dirn_em} {t.get('direction','?')}\n"
-               f"  📌 {t.get('pattern','?')}\n"
-               f"  💰 {fmt_pnl(t.get('pnl',0))}  ⏱️ {t.get('duration','?')}\n"
-               f"  📅 {t.get('date','?')}\n\n")
+        text+=f"{em} <b>{t.get('coin','?')}</b> {t.get('direction','?')} | {fmt_pnl(t.get('pnl',0))} | {t.get('duration','?')}\n"
+        text+=f"   {t.get('pattern','?')}\n\n"
     total=len(trade_journal); wins=sum(1 for t in trade_journal if t.get("result")=="WIN")
     wr=(wins/total*100) if total>0 else 0
-    text+=(f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-           f"  Total: {total}  |  WR: <b>{wr:.1f}%</b>\n"
-           f"  🕐 {get_ist_time()}")
+    text+=f"Total: {total} | WR: {wr:.1f}%"
     return text
 
 def get_patterns_ranked_text():
-    text=(f"┌──────────────────────────────────┐\n"
-          f"│  🌀  ALL PATTERNS RANKED         │\n"
-          f"└──────────────────────────────────┘\n\n")
+    text=f"<b>{BOT_HEADER} All Patterns Ranked</b>\n{S()}\n\n"
     all_pats=[]
     for pat,s in pattern_stats.items():
         sigs=s.get("signals",0); wr=(s["wins"]/sigs*100) if sigs>0 else 0
         w=s.get("weight",1.0); adj=get_adjusted_score(pat,80,"bull")
         all_pats.append((pat,sigs,wr,w,adj))
     all_pats.sort(key=lambda x:x[4],reverse=True)
-    medals=["🥇","🥈","🥉"]+["🔹"]*(len(all_pats)-3)
-    for i,(pat,sigs,wr,w,adj) in enumerate(all_pats):
+    for i,(pat,sigs,wr,w,adj) in enumerate(all_pats,1):
         flag="🔴" if wr<40 and sigs>=5 else "🟢" if wr>=60 else "🟡"
-        susp=" 🔒" if is_pattern_suspended(pat) else ""
-        trend="📈" if w>1.05 else "📉" if w<0.95 else "━"
-        filled=int(wr/10); bar="█"*filled+"░"*(10-filled)
-        text+=(f"  {medals[i]} <b>{pat}</b>{susp}\n"
-               f"  {flag} [{bar}] {wr:.1f}%\n"
-               f"  {sigs} trades  •  {trend}{w:.2f}x  •  Adj:{adj:.1f}\n\n")
-    text+=f"  🕐 {get_ist_time()}"
+        susp=" SUSP" if is_pattern_suspended(pat) else ""
+        trend="UP" if w>1.0 else "DN" if w<1.0 else "="
+        text+=f"{i:2}. {flag} <b>{pat}</b>{susp}\n    Signals:{sigs} WR:{wr:.1f}% Weight:{w:.2f}({trend})\n\n"
     return text
 
 def get_trend_label(ema20,ema50,price,label):
@@ -1065,10 +921,6 @@ def cmd_trend(coin_input):
         text+=f"{em} <b>{label}</b>: {trend}\n"
     rsi_1h=results[3][2] if len(results)>3 else 50
     adx_1h=results[3][3] if len(results)>3 else 0
-    text+=f"\n{S()}\n"
-    text+=f"Overall Bias: <b>{bias}</b>\n"
-    if s1 and r1:
-        text+=f"Support: {format_price(s1)} | Resistance: {format_price(r1)}\n"
     text+=f"RSI(1h): {rsi_1h:.1f} | ADX(1h): {adx_1h:.1f}\n"
     text+=f"{S()}\n{get_ist_time()}"
     return text
@@ -1189,31 +1041,31 @@ def detect_patterns(symbol,klines,price,btc_trend):
     if ema20 and ema50 and closes[-1]<lows[-2] and closes[-2]<lows[-3] and price<ema20 and price<ema50*0.99 and btc_trend==-1:
         p.append(("Bear Flag Break",94,"SELL"))
     if closes[-1]>max(highs[-20:-1]) and vols[-1]>avg_vol*1.5:
-        if btc_trend==1: p.append(("Breakout",88,"BUY"))
+        if btc_trend==1: p.append(("Breakout",91,"BUY"))
     elif closes[-1]<min(lows[-20:-1]) and vols[-1]>avg_vol*1.5:
-        if btc_trend==-1: p.append(("Breakout",88,"SELL"))
+        if btc_trend==-1: p.append(("Breakout",91,"SELL"))
     if opens[-2]>closes[-2] and opens[-1]<closes[-2] and closes[-1]>opens[-2]:
         if btc_trend==1: p.append(("Bullish Engulfing",90,"BUY"))
     elif opens[-2]<closes[-2] and opens[-1]>closes[-2] and closes[-1]<opens[-2]:
         if btc_trend==-1: p.append(("Bearish Engulfing",90,"SELL"))
     if ema20 and ema50:
-        if price>ema20>ema50 and btc_trend==1:    p.append(("EMA Trend",85,"BUY"))
-        elif price<ema20<ema50 and btc_trend==-1: p.append(("EMA Trend",85,"SELL"))
+        if price>ema20>ema50 and btc_trend==1:    p.append(("EMA Trend",88,"BUY"))
+        elif price<ema20<ema50 and btc_trend==-1: p.append(("EMA Trend",88,"SELL"))
     if ema20 and abs(price-ema20)/ema20<0.005:
-        p.append(("Pullback to 20 EMA",82,"BUY" if price>ema20 else "SELL"))
-    if rsi<30:   p.append(("RSI Reversal",80,"BUY"))
-    elif rsi>70: p.append(("RSI Reversal",80,"SELL"))
+        p.append(("Pullback to 20 EMA",86,"BUY" if price>ema20 else "SELL"))
+    if rsi<30:   p.append(("RSI Reversal",84,"BUY"))
+    elif rsi>70: p.append(("RSI Reversal",84,"SELL"))
     mom=(closes[-1]-closes[-3])/closes[-3]*100 if len(closes)>3 else 0
-    if mom>3 and btc_trend==1:    p.append(("Momentum Surge",87,"BUY"))
-    elif mom<-3 and btc_trend==-1: p.append(("Momentum Surge",87,"SELL"))
+    if mom>3 and btc_trend==1:    p.append(("Momentum Surge",89,"BUY"))
+    elif mom<-3 and btc_trend==-1: p.append(("Momentum Surge",89,"SELL"))
     if vols[-1]>avg_vol*3.5:
-        p.append(("Volume Spike",84,"BUY" if closes[-1]>opens[-1] else "SELL"))
-    if price<=sup*1.005 and closes[-1]>opens[-1]: p.append(("Support Bounce",88,"BUY"))
-    if price>=res*0.995 and closes[-1]<opens[-1]: p.append(("Resistance Rejection",88,"SELL"))
+        p.append(("Volume Spike",87,"BUY" if closes[-1]>opens[-1] else "SELL"))
+    if price<=sup*1.005 and closes[-1]>opens[-1]: p.append(("Support Bounce",90,"BUY"))
+    if price>=res*0.995 and closes[-1]<opens[-1]: p.append(("Resistance Rejection",90,"SELL"))
     if len(lows)>40:
-        if abs(min(lows[-40:-20])-min(lows[-10:]))/price<0.005: p.append(("Double Bottom",90,"BUY"))
-        if abs(max(highs[-40:-20])-max(highs[-10:]))/price<0.005: p.append(("Double Top",90,"SELL"))
-    if price>res and vols[-1]>avg_vol*2.5 and btc_trend==1: p.append(("Volume Breakout",91,"BUY"))
+        if abs(min(lows[-40:-20])-min(lows[-10:]))/price<0.005: p.append(("Double Bottom",91,"BUY"))
+        if abs(max(highs[-40:-20])-max(highs[-10:]))/price<0.005: p.append(("Double Top",91,"SELL"))
+    if price>res and vols[-1]>avg_vol*2.5 and btc_trend==1: p.append(("Volume Breakout",92,"BUY"))
     return p
 
 def update_trailing_sl(coin,trade,price):
@@ -1317,60 +1169,86 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     expiry_str=expiry_time.strftime("%I:%M %p IST")
     mom=(closes[-1]-closes[-3])/closes[-3]*100
     rsi_val=calculate_rsi(closes)
-    grade=get_signal_grade(setup["setup_score"],whale,oi_rising,tf_score,vol_ok,rsi_ok,funding_ok,st_ok,vwap_ok,zone_ok,adx_val)
+    grade_result=get_signal_grade(setup["setup_score"],whale,oi_rising,tf_score,vol_ok,rsi_ok,funding_ok,st_ok,vwap_ok,zone_ok,adx_val)
+    grade,pts,breakdown=grade_result
     pos_size=get_position_size_pct(grade)
     sl_pct=abs(entry-sl)/entry*100; tp_pct=abs(tp-entry)/entry*100
     rr_ratio=tp_pct/sl_pct if sl_pct>0 else 0
-    tf_map={3:"4h + 1h STRONG",2:"4h ALIGNED",1:"1h ONLY",0:"COUNTER-TREND"}
+    tf_map={3:"4h + 1h  ✅✅",2:"4h Only  ✅",1:"1h Only  ⚡",0:"Counter  ⚠️"}
     tf_label=tf_map.get(tf_score,"N/A")
-    cond_em={"bull":"Bullish","bear":"Bearish","sideways":"Sideways"}.get(market_condition,"")
-    dir_em="BUY" if setup["direction"]=="BUY" else "SELL"
-    if is_instant: sig_type="INSTANT SIGNAL"
-    elif is_river: sig_type="RIVER SIGNAL"
-    else:          sig_type="VERIFIED SETUP"
-    dir_arrow = "🟢 LONG" if setup["direction"]=="BUY" else "🔴 SHORT"
-    grade_em  = "🏆" if "A+" in grade else "⭐" if " A" in grade else "✅" if "B" in grade else "⚠️"
-    cond_icon = "📈" if market_condition=="bull" else "📉" if market_condition=="bear" else "➡️"
+    cond_em={"bull":"Bullish 📈","bear":"Bearish 📉","sideways":"Sideways ➡️"}.get(market_condition,"")
+    if is_instant: sig_type="⚡ INSTANT SIGNAL"
+    elif is_river: sig_type="🌊 RIVER SIGNAL"
+    else:          sig_type="🔥 VERIFIED SETUP"
+    dir_arrow="🟢 LONG  ▲" if setup["direction"]=="BUY" else "🔴 SHORT ▼"
+    grade_em="🏆" if "A+" in grade else "🥇" if " A" in grade else "🥈" if "B" in grade else "🥉"
+    cond_icon="📈" if market_condition=="bull" else "📉" if market_condition=="bear" else "➡️"
 
     if setup["direction"]=="BUY":
         ms10=format_price(entry); ms20=format_price(entry+(tp-entry)*0.5); ms35=format_price(entry+(tp-entry)*0.75)
     else:
         ms10=format_price(entry); ms20=format_price(entry-(entry-tp)*0.5); ms35=format_price(entry-(entry-tp)*0.75)
 
+    # ── Score bar ──
+    filled=min(int(setup["setup_score"]/10),10)
+    score_bar="█"*filled+"░"*(10-filled)
+
+    # ── Grade bar ──
+    max_pts=19
+    grade_filled=min(int(pts/max_pts*10),10)
+    grade_bar="█"*grade_filled+"░"*(10-grade_filled)
+
     msg  = f"{'⚡' if is_instant else '🔥'} <b>{sig_type}</b>\n"
-    msg += f"⚙️ <b>TRADING SIGNAL MASTER v32G</b>\n"
-    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    msg += f"🪙 <b>{coin}</b>  {dir_arrow}  🔧 <b>{lev}x</b>\n"
-    msg += f"{grade_em} <b>{grade}</b>  •  Score: <b>{setup['setup_score']:.0f}/100</b>\n"
-    msg += f"{cond_icon} {cond_em} Market\n"
-    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    msg += f"💰 <b>Entry</b>    <code>{format_price(entry)}</code>\n"
-    msg += f"🎯 <b>Target</b>   <code>{format_price(tp)}</code>  <i>(+{tp_pct:.2f}%)</i>\n"
-    msg += f"🛑 <b>Stop</b>     <code>{format_price(sl)}</code>  <i>(-{sl_pct:.2f}%)</i>\n\n"
-    msg += f"📈 Profit: <b>{profit_target:.1f}%</b>  •  RR: <b>1:{rr_ratio:.1f}</b>\n"
-    msg += f"💼 Size: <b>{pos_size:.0f}% of capital</b>\n"
-    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    msg += f"📌 <b>Pattern:</b> {setup['pattern']}\n"
-    msg += f"📊 RSI: {rsi_val:.1f}  ADX: {adx_val:.1f}  Mom: {mom:+.2f}%\n"
-    msg += f"📡 TF: {tf_label}\n"
-    st_icon = "✅" if st_ok else "⚠️"
-    msg += f"🌀 SuperTrend: {st_icon} ({st_15m}/{st_1h})  VWAP: {vwap_label}\n"
-    oi_icon = "✅" if oi_rising else "⚠️" if oi_rising is False else "➖"
-    whale_icon = "✅" if whale else "❌"
-    msg += f"📦 OI: {oi_icon} {oi_label}  🐋 Whale: {whale_icon}\n"
-    if zone_ok: msg += f"📍 Zone: ✅ In {'demand' if setup['direction']=='BUY' else 'supply'} zone\n"
-    if div=="BULLISH_DIV":  msg += f"📊 RSI Divergence: 🟢 Bullish\n"
-    elif div=="BEARISH_DIV": msg += f"📊 RSI Divergence: 🔴 Bearish\n"
-    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"⏳ ETA: ~{eta} mins  •  ⏰ Expires: {expiry_str}\n"
-    msg += f"✏️ ATR(1h): {format_price(atr_1h)}\n"
-    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"📋 <b>Milestone Plan:</b>\n"
-    msg += f"  🎯 +10% → Move SL to <code>{ms10}</code>\n"
-    msg += f"  🎯 +20% → Move SL to <code>{ms20}</code>\n"
-    msg += f"  🚀 +35% → Move SL to <code>{ms35}</code>\n"
-    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"🕐 {get_ist_time()}"
+    msg += f"┌─────────────────────────────────┐\n"
+    msg += f"│  ⚙️  TRADING SIGNAL MASTER v32G  │\n"
+    msg += f"└─────────────────────────────────┘\n\n"
+    msg += f"  🪙 <b>{coin}</b>  {dir_arrow}  🔧 <b>{lev}x Leverage</b>\n"
+    msg += f"  {grade_em} <b>{grade}</b>  •  {pts}/{max_pts} pts\n"
+    msg += f"  [{grade_bar}]\n"
+    msg += f"  📊 Setup Score: <b>{setup['setup_score']:.0f}/100</b>  [{score_bar}]\n"
+    msg += f"  {cond_icon} Market: <b>{cond_em}</b>\n\n"
+
+    msg += f"  ┌── TRADE LEVELS ─────────────┐\n"
+    msg += f"  │  💰 Entry   <code>{format_price(entry)}</code>\n"
+    msg += f"  │  🎯 Target  <code>{format_price(tp)}</code>  <i>+{tp_pct:.2f}%</i>\n"
+    msg += f"  │  🛑 Stop    <code>{format_price(sl)}</code>  <i>-{sl_pct:.2f}%</i>\n"
+    msg += f"  └─────────────────────────────┘\n\n"
+
+    msg += f"  📈 Max Profit : <b>+{profit_target:.1f}%</b>\n"
+    msg += f"  ⚖️  Risk/Reward: <b>1 : {rr_ratio:.1f}</b>\n"
+    msg += f"  💼 Position   : <b>{pos_size:.0f}% of capital</b>\n\n"
+
+    msg += f"  ┌── ALIGNMENT SCORECARD ──────┐\n"
+    for name,p in breakdown:
+        bar="●" if p>0 else "○"
+        pts_txt=f"+{p}pt{'s' if p!=1 else ''}" if p>0 else "  —  "
+        msg+=f"  │  {bar} {name:<22} {pts_txt}\n"
+    msg += f"  │                              \n"
+    msg += f"  │  Total: <b>{pts} / {max_pts} points</b>\n"
+    msg += f"  └─────────────────────────────┘\n\n"
+
+    msg += f"  ┌── CONFIRMATIONS ────────────┐\n"
+    msg += f"  │  📡 TF   : {tf_label}\n"
+    st_icon="✅✅" if st_ok else "⚠️"
+    msg += f"  │  🌀 ST   : {st_icon}  VWAP: {'✅' if vwap_ok else '⚠️'}\n"
+    oi_icon="✅" if oi_rising else "⚠️" if oi_rising is False else "➖"
+    whale_icon="✅" if whale else "—"
+    msg += f"  │  📦 OI   : {oi_icon} {oi_label:<8}  🐋: {whale_icon}\n"
+    msg += f"  │  📌 Pat  : {setup['pattern']}\n"
+    msg += f"  │  📊 RSI  : {rsi_val:.1f}   ADX: {adx_val:.1f}   Mom: {mom:+.2f}%\n"
+    if zone_ok: msg += f"  │  📍 Zone : ✅ {'Demand' if setup['direction']=='BUY' else 'Supply'}\n"
+    if div=="BULLISH_DIV":   msg += f"  │  🔀 Div  : 🟢 Bullish RSI Divergence\n"
+    elif div=="BEARISH_DIV": msg += f"  │  🔀 Div  : 🔴 Bearish RSI Divergence\n"
+    msg += f"  └─────────────────────────────┘\n\n"
+
+    msg += f"  ┌── MILESTONE PLAN ───────────┐\n"
+    msg += f"  │  🎯 +10%  → SL to <code>{ms10}</code>\n"
+    msg += f"  │  🎯 +20%  → SL to <code>{ms20}</code>\n"
+    msg += f"  │  🚀 +35%  → SL to <code>{ms35}</code>\n"
+    msg += f"  └─────────────────────────────┘\n\n"
+
+    msg += f"  ⏳ ETA: ~{eta} min  •  ⏰ Exp: {expiry_str}\n"
+    msg += f"  🕐 {get_ist_time()}"
     setup.update({"entry":entry,"sl":sl,"tp":tp,"timestamp":get_ist_datetime(),
                   "expires_at":expiry_time,"reversal_alerted":False,"breakeven_sent":False,
                   "partial_tp_taken":False,"milestones_sent":[],"tf_score":tf_score,
@@ -1589,11 +1467,12 @@ def poll_telegram():
                     elif txt in ("/start","/help","/menu"):
                         menu_kb={
                             "keyboard":[
-                                [{"text":"📊 Trades"},    {"text":"⏳ Pending"},   {"text":"📈 Stats"}],
-                                [{"text":"📅 Summary"},   {"text":"🔥 Streak"},    {"text":"🏆 Best"}],
-                                [{"text":"🛡️ Risk"},      {"text":"🧠 Learn"},     {"text":"📓 Journal"}],
-                                [{"text":"🌀 Patterns"},  {"text":"📰 News"},      {"text":"🌍 Market"}],
-                                [{"text":"🔍 Scan"},      {"text":"⚡ CB Status"}, {"text":"🔔 Alerts"}],
+                                [{"text":"📊 Trades"},   {"text":"⏳ Pending"},   {"text":"📈 Stats"}],
+                                [{"text":"📅 Summary"},  {"text":"🔥 Streak"},    {"text":"🏆 Best"}],
+                                [{"text":"🛡️ Risk"},     {"text":"🧠 Learn"},     {"text":"📓 Journal"}],
+                                [{"text":"🌀 Patterns"}, {"text":"📰 News"},      {"text":"🌍 Market"}],
+                                [{"text":"🔍 Scan"},     {"text":"⚡ CB Status"}, {"text":"📡 Status"}],
+                                [{"text":"🔔 Alerts"},   {"text":"📉 Trend BTC"}, {"text":"🔬 Backtest BTC"}],
                             ],
                             "resize_keyboard":True,
                             "persistent":True
@@ -1603,7 +1482,7 @@ def poll_telegram():
                             f"│  ⚙️  TRADING SIGNAL MASTER v32G  │\n"
                             f"│     Smart • Fast • Accurate       │\n"
                             f"└──────────────────────────────────┘\n\n"
-                            f"  Tap a button below or type a command:\n\n"
+                            f"  Tap a button or type a command:\n\n"
                             f"  📊 /trades    — Active trades\n"
                             f"  ⏳ /pending   — Pending signals\n"
                             f"  📈 /stats     — Pattern stats\n"
@@ -1618,12 +1497,40 @@ def poll_telegram():
                             f"  🌍 /market    — Market overview\n"
                             f"  🔍 /scan      — Manual scan\n"
                             f"  ⚡ /cb        — Circuit breaker\n"
+                            f"  📡 /status    — Live bot status\n"
                             f"  🔔 /alerts    — Price alerts\n"
                             f"  📉 /trend BTC — Trend analysis\n"
                             f"  🆚 /compare BTC ETH — Compare\n"
                             f"  🔬 /backtest BTC — Backtest\n\n"
                             f"  🕐 {get_ist_time()}",
                             reply_markup=menu_kb
+                        )
+                    # ── /status + 📡 Status button ──
+                    elif txt in ("/status","📡 status"):
+                        btc_p=get_price("BTCUSDT"); fng=get_fear_greed_index()
+                        btc_k=get_klines("BTCUSDT","1h",50)
+                        bt_e=calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
+                        bt=1 if (btc_p and bt_e and btc_p>bt_e) else -1
+                        mc=detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "unknown"
+                        sess=is_good_trading_session(); cb=check_circuit_breaker()
+                        btc_crash=is_btc_crashing()
+                        send_telegram(
+                            f"┌──────────────────────────────────┐\n"
+                            f"│  🔍  LIVE BOT STATUS             │\n"
+                            f"└──────────────────────────────────┘\n\n"
+                            f"  {'✅' if sess else '🔴'} Trading Session : {'ACTIVE' if sess else 'DEAD (2-7AM IST)'}\n"
+                            f"  {'✅' if not cb else '🔴'} Circuit Breaker : {'OK' if not cb else 'ACTIVE — paused'}\n"
+                            f"  {'✅' if not btc_crash else '🔴'} BTC Crash Guard : {'OK' if not btc_crash else 'BTC CRASHING'}\n"
+                            f"  {'🟢' if bt==1 else '🔴'} BTC Trend       : {'BULLISH ▲' if bt==1 else 'BEARISH ▼'}\n"
+                            f"  📊 Market        : {mc.upper()}\n"
+                            f"  😰 Fear & Greed  : {fng}\n"
+                            f"  📌 Active Trades : {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
+                            f"  ⏳ Pending       : {len(pending_signals)}\n"
+                            f"  🔒 Cooldowns     : {len(coin_cooldowns)} coins\n"
+                            f"  📉 Daily Losses  : {daily_losses}/{MAX_DAILY_LOSSES}\n"
+                            f"  🎯 Min Score     : {MIN_SETUP_SCORE}\n\n"
+                            f"  {'🟢 Bot CAN send signals now' if sess and not cb else '🔴 Bot BLOCKED — check flags above'}\n\n"
+                            f"  🕐 {get_ist_time()}"
                         )
                     # ── Reply keyboard button tap handlers ──
                     elif txt=="📊 trades":  send_telegram(get_active_trades_text())
@@ -1633,7 +1540,8 @@ def poll_telegram():
                                  f"│  ⏳  PENDING SIGNALS ({len(pending_signals)})          │\n"
                                  f"└──────────────────────────────────┘\n\n")
                             for c,s in pending_signals.items():
-                                exp=s.get("expires_at"); exp_str=exp.strftime("%I:%M %p IST") if isinstance(exp,datetime) else "N/A"
+                                exp=s.get("expires_at")
+                                exp_str=exp.strftime("%I:%M %p IST") if isinstance(exp,datetime) else "N/A"
                                 dirn_em="🟢 LONG" if s.get("direction")=="BUY" else "🔴 SHORT"
                                 msg+=(f"  🪙 <b>{c}</b>  {dirn_em}\n"
                                       f"  📌 {s.get('pattern','?')}\n"
@@ -1641,7 +1549,7 @@ def poll_telegram():
                             msg+=f"  🕐 {get_ist_time()}"
                             send_telegram(msg)
                         else:
-                            send_telegram(f"┌──────────────────────┐\n│  ⏳  PENDING SIGNALS  │\n└──────────────────────┘\n\n  ⚪ No pending signals.\n\n  🕐 {get_ist_time()}")
+                            send_telegram(f"⏳ <b>{BOT_HEADER}</b>\nNo pending signals right now.")
                     elif txt=="📈 stats":    send_telegram(get_pattern_stats_text())
                     elif txt=="📅 summary":  send_telegram(get_10day_summary_text())
                     elif txt=="🔥 streak":   send_telegram(get_streak_text())
@@ -1651,7 +1559,7 @@ def poll_telegram():
                     elif txt=="📓 journal":  send_telegram(get_journal_text())
                     elif txt=="🌀 patterns": send_telegram(get_patterns_ranked_text())
                     elif txt=="📰 news":
-                        send_telegram(f"  📰 Fetching latest news...")
+                        send_telegram(f"📰 Fetching latest news...")
                         send_telegram(get_crypto_news())
                     elif txt=="🌍 market":   send_telegram(cmd_market())
                     elif txt=="🔍 scan":
@@ -1661,12 +1569,12 @@ def poll_telegram():
                         fg2=get_fear_greed_index(); mc2=detect_market_condition(btc_p2,btc_k2) if btc_p2 and btc_k2 else "sideways"
                         send_telegram(cmd_scan_manual(bt2,fg2,mc2))
                     elif txt=="⚡ cb status":
-                        cb_active=check_circuit_breaker()
+                        cb_on=check_circuit_breaker()
                         send_telegram(
                             f"┌──────────────────────────────────┐\n"
                             f"│  ⚡  CIRCUIT BREAKER STATUS      │\n"
                             f"└──────────────────────────────────┘\n\n"
-                            f"  Status   : {'🔴 ACTIVE — scanning paused' if cb_active else '🟢 OK — scanning active'}\n"
+                            f"  Status   : {'🔴 ACTIVE — scanning paused' if cb_on else '🟢 OK — scanning active'}\n"
                             f"  Losses   : {daily_losses}/{MAX_DAILY_LOSSES}\n"
                             f"  Resets   : Midnight IST\n\n"
                             f"  🕐 {get_ist_time()}"
@@ -1678,10 +1586,17 @@ def poll_telegram():
                                  f"└──────────────────────────────────┘\n\n")
                             for sym,a in price_alerts.items():
                                 msg+=f"  🔔 <b>{sym}</b>  {a['direction'].upper()}  <code>{format_price(a['price'])}</code>\n"
-                            msg+=f"\n  ➕ Add: /alert BTC 95000 above\n  🕐 {get_ist_time()}"
+                            msg+=f"\n  ➕ /alert BTC 95000 above\n  🕐 {get_ist_time()}"
                             send_telegram(msg)
                         else:
-                            send_telegram(f"┌──────────────────────┐\n│  🔔  PRICE ALERTS    │\n└──────────────────────┘\n\n  ⚪ No alerts set.\n\n  ➕ /alert BTC 95000 above\n  🕐 {get_ist_time()}")
+                            send_telegram(f"🔔 <b>{BOT_HEADER}</b>\nNo alerts set.\nAdd: /alert BTC 95000 above")
+                    elif txt=="📉 trend btc" or txt.startswith("📉 trend"):
+                        parts=txt.split(); coin_t=(parts[-1].upper() if len(parts)>1 else "BTC")+"USDT"
+                        send_telegram(cmd_trend(coin_t))
+                    elif txt.startswith("🔬 backtest"):
+                        parts=txt.split(); bc2=(parts[-1].upper() if len(parts)>1 else "BTC")+"USDT"
+                        send_telegram(f"Running backtest for {bc2}...")
+                        send_telegram(run_backtest(bc2))
         except requests.RequestException as e: logger.error(f"Poll network: {e}")
         except Exception as e:                 logger.error(f"Poll error: {e}",exc_info=True)
         time.sleep(2)
