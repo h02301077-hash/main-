@@ -15,8 +15,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
-CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
+CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -74,7 +74,7 @@ last_weekly_report_day = None
 SCAN_INTERVAL            = 300
 BATCH_INTERVAL           = 1800
 RIVER_INTERVAL           = 900
-MIN_SETUP_SCORE          = 93
+MIN_SETUP_SCORE          = 90
 MIN_PRIMARY_SCORE        = 82
 INSTANT_SIGNAL_THRESHOLD = 97
 MIN_PROFIT_TARGET        = 15.0
