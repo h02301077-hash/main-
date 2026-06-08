@@ -15,8 +15,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAG3Pdr98EySWSpsPLvlM10qUb7TeTPc-u4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -74,7 +74,7 @@ last_weekly_report_day = None
 SCAN_INTERVAL            = 300
 BATCH_INTERVAL           = 1800
 RIVER_INTERVAL           = 900
-MIN_SETUP_SCORE          = 94
+MIN_SETUP_SCORE          = 93
 MIN_PRIMARY_SCORE        = 82
 INSTANT_SIGNAL_THRESHOLD = 97
 MIN_PROFIT_TARGET        = 15.0
@@ -186,6 +186,37 @@ def load_alerts():
         if os.path.exists("alerts.json"):
             with open("alerts.json") as f: price_alerts=json.load(f)
     except Exception as e: logger.error(f"load_alerts: {e}")
+
+def save_pending_signals():
+    try:
+        s={}
+        for coin,sig in list(pending_signals.items()):
+            d=dict(sig)
+            if isinstance(d.get("timestamp"),datetime): d["timestamp"]=d["timestamp"].isoformat()
+            if isinstance(d.get("expires_at"),datetime): d["expires_at"]=d["expires_at"].isoformat()
+            s[coin]=d
+        with open("pending_signals.json","w") as f: json.dump(s,f)
+    except Exception as e: logger.error(f"save_pending: {e}")
+
+def load_pending_signals():
+    global pending_signals
+    try:
+        if not os.path.exists("pending_signals.json"): return
+        with open("pending_signals.json") as f: data=json.load(f)
+        now=get_ist_datetime()
+        for coin,sig in data.items():
+            if sig.get("expires_at"):
+                try:
+                    exp=datetime.fromisoformat(sig["expires_at"])
+                    if now>exp: continue
+                    sig["expires_at"]=exp
+                except Exception: continue
+            if sig.get("timestamp"):
+                try: sig["timestamp"]=datetime.fromisoformat(sig["timestamp"])
+                except Exception: pass
+            pending_signals[coin]=sig
+        logger.info(f"Loaded {len(pending_signals)} pending signals.")
+    except Exception as e: logger.error(f"load_pending: {e}")
 
 def save_circuit_breaker():
     try:
@@ -712,51 +743,152 @@ def run_backtest(symbol):
     except Exception as e: return f"Backtest failed: {e}"
 
 def get_active_trades_text():
-    if not active_trades: return f"<b>{BOT_HEADER}</b>\nNo active trades."
-    text=f"<b>{BOT_HEADER} Active Trades ({len(active_trades)})</b>\n{S()}\n\n"
+    if not active_trades:
+        return (
+            "┌─────────────────────────────────┐\n"
+            "│   📊  ACTIVE TRADES MONITOR     │\n"
+            "└─────────────────────────────────┘\n\n"
+            "  ⚪  No active trades right now.\n\n"
+            f"  🛡️ Circuit Breaker : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
+            f"  ⏳ Pending Signals  : {len(pending_signals)}\n"
+            f"  🕐 {get_ist_time()}"
+        )
+    now=get_ist_datetime()
+    lines=[]
+    total_pnl=0.0
     for coin,t in active_trades.items():
-        sl_pct=abs(t['entry']-t['sl'])/t['entry']*100; tp_pct=abs(t['tp']-t['entry'])/t['entry']*100
-        text+=f"🔹 <b>{coin}</b> {t['direction']} | {t['leverage']}x\n"
-        text+=f"   Entry: {format_price(t['entry'])}\n"
-        text+=f"   TP: {format_price(t['tp'])} (+{tp_pct:.1f}%) | SL: {format_price(t['sl'])} (-{sl_pct:.1f}%)\n\n"
-    return text
+        price=get_price(t.get("symbol",coin+"USDT"))
+        sl_pct=abs(t["entry"]-t["sl"])/t["entry"]*100
+        tp_pct=abs(t["tp"]-t["entry"])/t["entry"]*100
+        rr=round(tp_pct/sl_pct,1) if sl_pct>0 else 0
+        dirn=t.get("direction","?"); lev=t.get("leverage",1)
+        pat=t.get("pattern","?").split(" + ")[0]
+        dir_em="🟢 LONG" if dirn=="BUY" else "🔴 SHORT"
+        dur_txt=""
+        if t.get("timestamp"):
+            try:
+                mins=int((now-t["timestamp"]).total_seconds()/60)
+                dur_txt=f"{mins}m" if mins<60 else f"{mins//60}h {mins%60}m"
+            except Exception: pass
+        if price:
+            pnl=((price-t["entry"])/t["entry"])*100*lev if dirn=="BUY" else ((t["entry"]-price)/t["entry"])*100*lev
+            total_pnl+=pnl
+            pnl_txt=fmt_pnl(pnl)
+        else:
+            pnl_txt="⏳ Loading"
+        ms=t.get("milestones_sent",[])
+        ms_txt="🚀 +35% reached" if "p35" in ms else "🔥 +20% reached" if "p20" in ms else "✅ +10% reached" if "p10" in ms else ""
+        partial="  💰 Partial TP taken" if t.get("partial_tp_taken") else ""
+        block =(f"  ┌──────────────────────────────\n"
+                f"  │  🪙 <b>{coin}</b>  {dir_em}  🔧 {lev}x\n"
+                f"  │  💰 Entry  : <code>{format_price(t['entry'])}</code>\n"
+                f"  │  🎯 Target : <code>{format_price(t['tp'])}</code>  (+{tp_pct:.2f}%)\n"
+                f"  │  🛑 Stop   : <code>{format_price(t['sl'])}</code>  (-{sl_pct:.2f}%)\n"
+                f"  │  ⚖️  RR 1:{rr}  ⏱️ {dur_txt or 'just started'}\n"
+                f"  │  📈 Live PnL : {pnl_txt}{partial}\n")
+        if ms_txt: block+=f"  │  {ms_txt}\n"
+        block+=f"  │  📌 {pat}\n  └──────────────────────────────"
+        lines.append(block)
+    header=(f"┌─────────────────────────────────┐\n"
+            f"│  📊  ACTIVE TRADES  ({len(active_trades)}/{MAX_ACTIVE_TRADES})         │\n"
+            f"└─────────────────────────────────┘\n\n")
+    footer=(f"\n\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  💼 Portfolio PnL : {fmt_pnl(total_pnl)}\n"
+            f"  🛡️ Circuit Breaker : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
+            f"  ⏳ Pending : {len(pending_signals)}\n"
+            f"  🕐 {get_ist_time()}")
+    return header+"\n\n".join(lines)+footer
 
 def get_pattern_stats_text():
-    text=f"<b>{BOT_HEADER} Pattern Performance</b>\n{S()}\n\n"
-    for pat,s in sorted(pattern_stats.items(),key=lambda x:x[1]["signals"],reverse=True)[:10]:
+    tw=sum(s["wins"] for s in pattern_stats.values())
+    tl=sum(s["losses"] for s in pattern_stats.values())
+    ts=sum(s["signals"] for s in pattern_stats.values())
+    owr=(tw/ts*100) if ts>0 else 0
+    tp_=sum(s["total_pnl"] for s in pattern_stats.values())
+    text=(f"┌────────────────────────────────────┐\n"
+          f"│  📈  PATTERN PERFORMANCE           │\n"
+          f"└────────────────────────────────────┘\n\n"
+          f"  🔢 Total Signals : {ts}\n"
+          f"  ✅ Wins          : {tw}\n"
+          f"  ❌ Losses        : {tl}\n"
+          f"  🎯 Overall WR    : <b>{owr:.1f}%</b>\n"
+          f"  💰 Total PnL     : {fmt_pnl(tp_)}\n\n"
+          f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+    for pat,s in sorted(pattern_stats.items(),key=lambda x:x[1]["signals"],reverse=True):
         if s["signals"]>0:
-            wr=(s["wins"]/s["signals"])*100; flag="🔴" if wr<40 else "🟡" if wr<60 else "🟢"
-            susp=" SUSPENDED" if is_pattern_suspended(pat) else ""
-            text+=f"{flag} <b>{pat}</b>{susp}\nSignals:{s['signals']} WR:{wr:.1f}% PnL:{fmt_pnl(s['total_pnl'])}\n\n"
+            wr=(s["wins"]/s["signals"])*100
+            filled=int(wr/10); bar="█"*filled+"░"*(10-filled)
+            flag="🔴" if wr<40 else "🟡" if wr<60 else "🟢"
+            susp=" 🔒 SUSPENDED" if is_pattern_suspended(pat) else ""
+            w=s.get("weight",1.0); wtxt=f"📈{w:.1f}x" if w>1.05 else f"📉{w:.1f}x" if w<0.95 else "━"
+            text+=(f"  {flag} <b>{pat}</b>{susp}\n"
+                   f"  [{bar}] {wr:.1f}% | {s['signals']} trades | {wtxt}\n"
+                   f"  {s['wins']}W / {s['losses']}L  •  {fmt_pnl(s['total_pnl'])}\n\n")
+    text+=f"  🕐 {get_ist_time()}"
     return text
 
 def get_10day_summary_text():
-    today=datetime.now(IST).date(); text=f"<b>{BOT_HEADER} Last 10 Days</b>\n{S()}\n\n"
-    ow=ol=0; op=0.0
+    today=datetime.now(IST).date()
+    text=(f"┌────────────────────────────────────┐\n"
+          f"│  📅  10-DAY PERFORMANCE REPORT     │\n"
+          f"└────────────────────────────────────┘\n\n")
+    ow=ol=0; op=0.0; best_pnl=None; worst_pnl=None; best_ds=worst_ds=""
     for days_ago in range(9,-1,-1):
-        day=today-timedelta(days=days_ago); dt=[j for j in trade_journal if j.get("date")==str(day)]
+        day=today-timedelta(days=days_ago)
+        dt=[j for j in trade_journal if j.get("date")==str(day)]
         w=sum(1 for t in dt if t["result"]=="WIN"); l=sum(1 for t in dt if t["result"]=="LOSS")
         total=w+l; pnl=sum(t["pnl"] for t in dt); wr=(w/total*100) if total>0 else 0
         ow+=w; ol+=l; op+=pnl; ds=day.strftime("%d %b")
-        if total==0: text+=f"⚪ <b>{ds}</b> - No trades\n"
+        if total==0:
+            text+=f"  ⚪ <b>{ds}</b>  ─  No trades\n"
         else:
             em="✅" if w>l else "❌" if l>w else "➖"
-            text+=f"{em} <b>{ds}</b>: {w}W/{l}L WR:{wr:.0f}% {fmt_pnl(pnl)}\n"
+            bar="█"*w+"░"*l
+            text+=f"  {em} <b>{ds}</b>  [{bar[:8]}]  {w}W/{l}L  {fmt_pnl(pnl)}\n"
+            if best_pnl is None or pnl>best_pnl: best_pnl=pnl; best_ds=ds
+            if worst_pnl is None or pnl<worst_pnl: worst_pnl=pnl; worst_ds=ds
     ot=ow+ol; owr=(ow/ot*100) if ot>0 else 0
-    text+=f"\n{S()}\n10 Day Total: {ow}W {ol}L | WR:{owr:.1f}% | {fmt_pnl(op)}"
+    text+=(f"\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+           f"  ✅ Wins     : {ow}\n"
+           f"  ❌ Losses   : {ol}\n"
+           f"  🎯 Win Rate : <b>{owr:.1f}%</b>\n"
+           f"  💰 Total PnL: {fmt_pnl(op)}\n"
+           f"  📊 Avg/Day  : {fmt_pnl(op/10)}\n")
+    if best_ds:  text+=f"  🏆 Best Day : {best_ds}  ({fmt_pnl(best_pnl)})\n"
+    if worst_ds: text+=f"  📉 Worst Day: {worst_ds}  ({fmt_pnl(worst_pnl)})\n"
+    text+=f"  🕐 {get_ist_time()}"
     return text
 
 def get_streak_text():
-    if not trade_journal: return f"<b>{BOT_HEADER}</b>\nNo trades yet."
+    if not trade_journal:
+        return ("┌──────────────────────────────┐\n"
+                "│  🔥  STREAK TRACKER          │\n"
+                "└──────────────────────────────┘\n\n"
+                "  ⚪ No trades recorded yet.")
     st=trade_journal[-1]["result"]; sc=0
     for t in reversed(trade_journal):
         if t["result"]==st: sc+=1
         else: break
+    total=len(trade_journal); wins=sum(1 for t in trade_journal if t["result"]=="WIN")
+    owr=(wins/total*100) if total>0 else 0
     em="🔥" if st=="WIN" else "❄️"
-    return f"{em} <b>{BOT_HEADER} Streak</b>\n{'Winning' if st=='WIN' else 'Losing'}: {sc} trades"
+    label="WINNING" if st=="WIN" else "LOSING"
+    bar=em*min(sc,10)
+    return (f"┌──────────────────────────────┐\n"
+            f"│  🔥  STREAK TRACKER          │\n"
+            f"└──────────────────────────────┘\n\n"
+            f"  {bar}\n\n"
+            f"  Current Streak : <b>{sc} {label}</b>\n"
+            f"  Total Trades   : {total}\n"
+            f"  Overall WR     : <b>{owr:.1f}%</b>\n\n"
+            f"  🕐 {get_ist_time()}")
 
 def get_best_text():
-    if not trade_journal: return f"<b>{BOT_HEADER}</b>\nNo data yet."
+    if not trade_journal:
+        return ("┌──────────────────────────────────┐\n"
+                "│  🏆  BEST PERFORMERS             │\n"
+                "└──────────────────────────────────┘\n\n"
+                "  ⚪ No trade data yet.")
     cs={}; ps2={}
     for t in trade_journal:
         c=t["coin"]
@@ -765,64 +897,124 @@ def get_best_text():
         p=t["pattern"]
         if p not in ps2: ps2[p]={"W":0,"L":0}
         ps2[p]["W" if t["result"]=="WIN" else "L"]+=1
-    text=f"<b>{BOT_HEADER} Best Performers</b>\n{S()}\n\nTop Coins:\n"
-    sc=sorted(cs.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:3]
-    for i,(c,s) in enumerate(sc,1):
+    sc=sorted(cs.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:5]
+    sp=sorted(ps2.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:5]
+    medals=["🥇","🥈","🥉","4️⃣","5️⃣"]
+    text=(f"┌──────────────────────────────────┐\n"
+          f"│  🏆  BEST PERFORMERS             │\n"
+          f"└──────────────────────────────────┘\n\n"
+          f"  💰 <b>Top Coins by Win Rate</b>\n\n")
+    for i,(c,s) in enumerate(sc,0):
         tot=s["W"]+s["L"]; wr=(s["W"]/tot*100) if tot>0 else 0
-        text+=f"{i}. <b>{c}</b> {wr:.1f}% WR {fmt_pnl(s['pnl'])}\n"
-    text+="\nTop Patterns:\n"
-    sp=sorted(ps2.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:3]
-    for i,(p,s) in enumerate(sp,1):
+        text+=f"  {medals[i]} <b>{c}</b>  {wr:.1f}% WR  ({tot} trades)  {fmt_pnl(s['pnl'])}\n"
+    text+=f"\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n  🌀 <b>Top Patterns by Win Rate</b>\n\n"
+    for i,(p,s) in enumerate(sp,0):
         tot=s["W"]+s["L"]; wr=(s["W"]/tot*100) if tot>0 else 0
-        text+=f"{i}. <b>{p}</b> {wr:.1f}% WR ({tot} trades)\n"
+        text+=f"  {medals[i]} <b>{p}</b>  {wr:.1f}% WR  ({tot} trades)\n"
+    text+=f"\n  🕐 {get_ist_time()}"
     return text
 
 def get_risk_text():
-    if not active_trades: return f"<b>{BOT_HEADER}</b>\nNo active trades."
-    text=f"<b>{BOT_HEADER} Risk Exposure</b>\n{S()}\n\n"; total_risk=0.0
+    if not active_trades:
+        return (f"┌──────────────────────────────────┐\n"
+                f"│  🛡️  RISK EXPOSURE MONITOR       │\n"
+                f"└──────────────────────────────────┘\n\n"
+                f"  ⚪  No active trades — zero risk.\n\n"
+                f"  🛡️ CB : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
+                f"  📉 Daily Losses : {daily_losses}/{MAX_DAILY_LOSSES}\n"
+                f"  🕐 {get_ist_time()}")
+    text=(f"┌──────────────────────────────────┐\n"
+          f"│  🛡️  RISK EXPOSURE MONITOR       │\n"
+          f"└──────────────────────────────────┘\n\n")
+    total_risk=0.0
     for coin,t in active_trades.items():
-        rp=abs(t["entry"]-t["sl"])/t["entry"]*100*t["leverage"]; total_risk+=rp
-        text+=f"{coin}: {rp:.1f}% max loss\n"
-    text+=f"\nTotal Risk: {total_risk:.1f}% | Active: {len(active_trades)}/{MAX_ACTIVE_TRADES}"
+        rp=abs(t["entry"]-t["sl"])/t["entry"]*100*t["leverage"]
+        tp_pct=abs(t["tp"]-t["entry"])/t["entry"]*100
+        sl_pct=abs(t["entry"]-t["sl"])/t["entry"]*100
+        total_risk+=rp
+        filled=min(int(rp/5),10); bar="█"*filled+"░"*(10-filled)
+        em="🔴" if rp>20 else "🟡" if rp>10 else "🟢"
+        text+=(f"  {em} <b>{coin}</b>  {t['direction']}  {t['leverage']}x\n"
+               f"  [{bar}] Max loss: {rp:.1f}%\n"
+               f"  SL dist: {sl_pct:.2f}%  TP dist: {tp_pct:.2f}%\n\n")
+    total_em="🔴" if total_risk>40 else "🟡" if total_risk>20 else "🟢"
+    text+=(f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+           f"  {total_em} Portfolio Risk : <b>{total_risk:.1f}%</b>\n"
+           f"  📌 Slots : {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
+           f"  🛡️ CB    : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
+           f"  📉 Losses: {daily_losses}/{MAX_DAILY_LOSSES}\n"
+           f"  ⏳ Pending: {len(pending_signals)}\n"
+           f"  🕐 {get_ist_time()}")
     return text
 
 def get_learning_text():
-    if not learning_notes: return f"<b>{BOT_HEADER}</b>\nNo insights yet."
-    text=f"<b>{BOT_HEADER} Learning</b>\n{S()}\n\nMarket Memory:\n"
+    if not learning_notes:
+        return ("┌──────────────────────────────────┐\n"
+                "│  🧠  BOT LEARNING & INSIGHTS     │\n"
+                "└──────────────────────────────────┘\n\n"
+                "  ⚪ No insights yet — keep trading!")
+    text=(f"┌──────────────────────────────────┐\n"
+          f"│  🧠  BOT LEARNING & INSIGHTS     │\n"
+          f"└──────────────────────────────────┘\n\n"
+          f"  📊 <b>Market Memory</b>\n\n")
+    icons={"bull":"📈","bear":"📉","sideways":"➡️"}
     for cond in ["bull","bear","sideways"]:
         mem=market_memory[cond]; tot=mem["wins"]+mem["losses"]
         wr=(mem["wins"]/tot*100) if tot>0 else 0
-        text+=f"  {cond}: {mem['wins']}W/{mem['losses']}L ({wr:.1f}%) Best:{mem['best_pattern'] or 'N/A'}\n"
-    text+=f"\nLatest Insights:\n"
-    for note in learning_notes[-8:]: text+=f"• {note}\n"
+        ic=icons.get(cond,"")
+        text+=(f"  {ic} <b>{cond.capitalize()}</b>  {mem['wins']}W/{mem['losses']}L  {wr:.1f}%\n"
+               f"     Best Pattern: {mem['best_pattern'] or 'N/A'}\n\n")
+    text+=(f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+           f"  💡 <b>Latest Insights</b>\n\n")
+    for note in learning_notes[-8:]:
+        text+=f"  • {note}\n"
+    text+=f"\n  🕐 {get_ist_time()}"
     return text
 
 def get_journal_text():
-    if not trade_journal: return f"<b>{BOT_HEADER}</b>\nNo trades yet."
+    if not trade_journal:
+        return ("┌──────────────────────────────────┐\n"
+                "│  📓  TRADE JOURNAL               │\n"
+                "└──────────────────────────────────┘\n\n"
+                "  ⚪ No trades recorded yet.")
     recent=trade_journal[-10:][::-1]
-    text=f"<b>{BOT_HEADER} Trade Journal</b>\n{S()}\n\n"
+    text=(f"┌──────────────────────────────────┐\n"
+          f"│  📓  TRADE JOURNAL (Last 10)     │\n"
+          f"└──────────────────────────────────┘\n\n")
     for t in recent:
         em="✅" if t.get("result")=="WIN" else "🔴"
-        text+=f"{em} <b>{t.get('coin','?')}</b> {t.get('direction','?')} | {fmt_pnl(t.get('pnl',0))} | {t.get('duration','?')}\n"
-        text+=f"   {t.get('pattern','?')}\n\n"
+        dirn_em="🟢" if t.get("direction")=="BUY" else "🔴"
+        text+=(f"  {em} <b>{t.get('coin','?')}</b>  {dirn_em} {t.get('direction','?')}\n"
+               f"  📌 {t.get('pattern','?')}\n"
+               f"  💰 {fmt_pnl(t.get('pnl',0))}  ⏱️ {t.get('duration','?')}\n"
+               f"  📅 {t.get('date','?')}\n\n")
     total=len(trade_journal); wins=sum(1 for t in trade_journal if t.get("result")=="WIN")
     wr=(wins/total*100) if total>0 else 0
-    text+=f"Total: {total} | WR: {wr:.1f}%"
+    text+=(f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+           f"  Total: {total}  |  WR: <b>{wr:.1f}%</b>\n"
+           f"  🕐 {get_ist_time()}")
     return text
 
 def get_patterns_ranked_text():
-    text=f"<b>{BOT_HEADER} All Patterns Ranked</b>\n{S()}\n\n"
+    text=(f"┌──────────────────────────────────┐\n"
+          f"│  🌀  ALL PATTERNS RANKED         │\n"
+          f"└──────────────────────────────────┘\n\n")
     all_pats=[]
     for pat,s in pattern_stats.items():
         sigs=s.get("signals",0); wr=(s["wins"]/sigs*100) if sigs>0 else 0
         w=s.get("weight",1.0); adj=get_adjusted_score(pat,80,"bull")
         all_pats.append((pat,sigs,wr,w,adj))
     all_pats.sort(key=lambda x:x[4],reverse=True)
-    for i,(pat,sigs,wr,w,adj) in enumerate(all_pats,1):
+    medals=["🥇","🥈","🥉"]+["🔹"]*(len(all_pats)-3)
+    for i,(pat,sigs,wr,w,adj) in enumerate(all_pats):
         flag="🔴" if wr<40 and sigs>=5 else "🟢" if wr>=60 else "🟡"
-        susp=" SUSP" if is_pattern_suspended(pat) else ""
-        trend="UP" if w>1.0 else "DN" if w<1.0 else "="
-        text+=f"{i:2}. {flag} <b>{pat}</b>{susp}\n    Signals:{sigs} WR:{wr:.1f}% Weight:{w:.2f}({trend})\n\n"
+        susp=" 🔒" if is_pattern_suspended(pat) else ""
+        trend="📈" if w>1.05 else "📉" if w<0.95 else "━"
+        filled=int(wr/10); bar="█"*filled+"░"*(10-filled)
+        text+=(f"  {medals[i]} <b>{pat}</b>{susp}\n"
+               f"  {flag} [{bar}] {wr:.1f}%\n"
+               f"  {sigs} trades  •  {trend}{w:.2f}x  •  Adj:{adj:.1f}\n\n")
+    text+=f"  🕐 {get_ist_time()}"
     return text
 
 def get_trend_label(ema20,ema50,price,label):
@@ -873,13 +1065,12 @@ def cmd_trend(coin_input):
         text+=f"{em} <b>{label}</b>: {trend}\n"
     rsi_1h=results[3][2] if len(results)>3 else 50
     adx_1h=results[3][3] if len(results)>3 else 0
-    dol=get_dol_signal(get_klines(symbol,"1h",35) or [])
     text+=f"\n{S()}\n"
     text+=f"Overall Bias: <b>{bias}</b>\n"
     if s1 and r1:
         text+=f"Support: {format_price(s1)} | Resistance: {format_price(r1)}\n"
     text+=f"RSI(1h): {rsi_1h:.1f} | ADX(1h): {adx_1h:.1f}\n"
-    text+=f"DOL: {dol}\n{S()}\n{get_ist_time()}"
+    text+=f"{S()}\n{get_ist_time()}"
     return text
 
 def cmd_market():
@@ -1106,7 +1297,6 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     oi_label="Rising" if oi_rising else "Falling" if oi_rising is False else "N/A"
     whale=has_whale_activity(setup["symbol"])
     adx_val=calculate_adx(klines_15m)
-    dol=get_dol_signal(klines_15m)
     tf_score=setup.get("tf_score",get_timeframe_score(setup["symbol"],setup["direction"]))
     lev=get_smart_leverage(setup["symbol"],atr_pct,setup["setup_score"])
     sl=get_structure_sl(klines_15m,setup["direction"],entry,atr_1h)
@@ -1171,7 +1361,6 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     if zone_ok: msg += f"📍 Zone: ✅ In {'demand' if setup['direction']=='BUY' else 'supply'} zone\n"
     if div=="BULLISH_DIV":  msg += f"📊 RSI Divergence: 🟢 Bullish\n"
     elif div=="BEARISH_DIV": msg += f"📊 RSI Divergence: 🔴 Bearish\n"
-    msg += f"💧 DOL: {dol}\n"
     msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     msg += f"⏳ ETA: ~{eta} mins  •  ⏰ Expires: {expiry_str}\n"
     msg += f"✏️ ATR(1h): {format_price(atr_1h)}\n"
@@ -1195,6 +1384,7 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     if result:
         sent_coins.append(coin)
         coin_cooldowns[coin]=get_ist_datetime()+timedelta(minutes=eta)
+        save_pending_signals()
         logger.info(f"Signal sent: {coin}|{setup['direction']}|Score:{setup['setup_score']}|ETA:{eta}m")
         return True
     else:
@@ -1328,12 +1518,14 @@ def poll_telegram():
                                     f"🕐 {get_ist_time()}"
                                 )
                                 del pending_signals[coin]
+                                save_pending_signals()
                                 logger.info(f"ACTIVATED: {coin}|{dirn}|Entry:{ep}|{lev}x")
                             else:
                                 send_telegram(f"⏰ <b>{BOT_HEADER}</b>\nSignal for {coin} expired.\nWait for next signal.")
                                 logger.warning(f"ACTIVATE failed: {coin} not in pending={list(pending_signals.keys())}")
                         elif action=="IGNORE":
                             if coin in pending_signals: del pending_signals[coin]
+                            save_pending_signals()
                             send_telegram(f"❌ <b>{BOT_HEADER}</b>\n{coin} signal ignored.")
                 elif "message" in update:
                     txt=update["message"].get("text","").strip().lower()
@@ -1395,78 +1587,101 @@ def poll_telegram():
                         send_telegram(f"Running backtest for {bc}...")
                         send_telegram(run_backtest(bc))
                     elif txt in ("/start","/help","/menu"):
-                        menu_keyboard={
+                        menu_kb={
                             "keyboard":[
-                                [{"text":"📊 Trades"},     {"text":"⏳ Pending"},   {"text":"📈 Stats"}],
-                                [{"text":"📅 Summary"},    {"text":"🔥 Streak"},    {"text":"🏆 Best"}],
-                                [{"text":"🛡️ Risk"},       {"text":"🧠 Learn"},     {"text":"📓 Journal"}],
-                                [{"text":"🌀 Patterns"},   {"text":"📰 News"},      {"text":"🌍 Market"}],
-                                [{"text":"🔍 Scan"},       {"text":"⚡ CB Status"}, {"text":"🔔 Alerts"}],
+                                [{"text":"📊 Trades"},    {"text":"⏳ Pending"},   {"text":"📈 Stats"}],
+                                [{"text":"📅 Summary"},   {"text":"🔥 Streak"},    {"text":"🏆 Best"}],
+                                [{"text":"🛡️ Risk"},      {"text":"🧠 Learn"},     {"text":"📓 Journal"}],
+                                [{"text":"🌀 Patterns"},  {"text":"📰 News"},      {"text":"🌍 Market"}],
+                                [{"text":"🔍 Scan"},      {"text":"⚡ CB Status"}, {"text":"🔔 Alerts"}],
                             ],
                             "resize_keyboard":True,
                             "persistent":True
                         }
                         send_telegram(
-                            f"<b>{BOT_HEADER}</b>\n{S()}\n\n"
-                            f"Tap a button below or type a command:\n\n"
-                            f"/trades    — Active trades\n"
-                            f"/pending   — Pending signals\n"
-                            f"/stats     — Pattern stats\n"
-                            f"/summary   — 10 day summary\n"
-                            f"/streak    — Win/loss streak\n"
-                            f"/best      — Top performers\n"
-                            f"/risk      — Risk exposure\n"
-                            f"/learn     — Bot insights\n"
-                            f"/journal   — Trade journal\n"
-                            f"/patterns  — All patterns ranked\n"
-                            f"/news      — Crypto news\n"
-                            f"/market    — Market overview\n"
-                            f"/scan      — Manual scan\n"
-                            f"/cb        — Circuit breaker\n"
-                            f"/alerts    — View price alerts\n"
-                            f"/trend BTC — Trend analysis\n"
-                            f"/backtest BTC — Backtest\n",
-                            reply_markup=menu_keyboard
+                            f"┌──────────────────────────────────┐\n"
+                            f"│  ⚙️  TRADING SIGNAL MASTER v32G  │\n"
+                            f"│     Smart • Fast • Accurate       │\n"
+                            f"└──────────────────────────────────┘\n\n"
+                            f"  Tap a button below or type a command:\n\n"
+                            f"  📊 /trades    — Active trades\n"
+                            f"  ⏳ /pending   — Pending signals\n"
+                            f"  📈 /stats     — Pattern stats\n"
+                            f"  📅 /summary   — 10-day summary\n"
+                            f"  🔥 /streak    — Win/loss streak\n"
+                            f"  🏆 /best      — Top performers\n"
+                            f"  🛡️ /risk      — Risk exposure\n"
+                            f"  🧠 /learn     — Bot insights\n"
+                            f"  📓 /journal   — Trade journal\n"
+                            f"  🌀 /patterns  — Patterns ranked\n"
+                            f"  📰 /news      — Crypto news\n"
+                            f"  🌍 /market    — Market overview\n"
+                            f"  🔍 /scan      — Manual scan\n"
+                            f"  ⚡ /cb        — Circuit breaker\n"
+                            f"  🔔 /alerts    — Price alerts\n"
+                            f"  📉 /trend BTC — Trend analysis\n"
+                            f"  🆚 /compare BTC ETH — Compare\n"
+                            f"  🔬 /backtest BTC — Backtest\n\n"
+                            f"  🕐 {get_ist_time()}",
+                            reply_markup=menu_kb
                         )
-                    # ── Button tap handlers (reply keyboard sends plain text) ──
-                    elif txt=="📊 trades":    send_telegram(get_active_trades_text())
+                    # ── Reply keyboard button tap handlers ──
+                    elif txt=="📊 trades":  send_telegram(get_active_trades_text())
                     elif txt=="⏳ pending":
                         if pending_signals:
-                            msg=f"<b>{BOT_HEADER} Pending ({len(pending_signals)})</b>\n{S()}\n\n"
+                            msg=(f"┌──────────────────────────────────┐\n"
+                                 f"│  ⏳  PENDING SIGNALS ({len(pending_signals)})          │\n"
+                                 f"└──────────────────────────────────┘\n\n")
                             for c,s in pending_signals.items():
-                                exp=s.get("expires_at"); exp_str=exp.strftime("%I:%M %p") if exp else "N/A"
-                                msg+=f"{c} {s.get('direction','?')} Score:{s.get('setup_score',0):.0f} Exp:{exp_str}\n"
+                                exp=s.get("expires_at"); exp_str=exp.strftime("%I:%M %p IST") if isinstance(exp,datetime) else "N/A"
+                                dirn_em="🟢 LONG" if s.get("direction")=="BUY" else "🔴 SHORT"
+                                msg+=(f"  🪙 <b>{c}</b>  {dirn_em}\n"
+                                      f"  📌 {s.get('pattern','?')}\n"
+                                      f"  📊 Score: {s.get('setup_score',0):.0f}  ⏰ Exp: {exp_str}\n\n")
+                            msg+=f"  🕐 {get_ist_time()}"
                             send_telegram(msg)
-                        else: send_telegram(f"<b>{BOT_HEADER}</b>\nNo pending signals.")
-                    elif txt=="📈 stats":     send_telegram(get_pattern_stats_text())
-                    elif txt=="📅 summary":   send_telegram(get_10day_summary_text())
-                    elif txt=="🔥 streak":    send_telegram(get_streak_text())
-                    elif txt=="🏆 best":      send_telegram(get_best_text())
-                    elif txt=="🛡️ risk":      send_telegram(get_risk_text())
-                    elif txt=="🧠 learn":     send_telegram(get_learning_text())
-                    elif txt=="📓 journal":   send_telegram(get_journal_text())
-                    elif txt=="🌀 patterns":  send_telegram(get_patterns_ranked_text())
+                        else:
+                            send_telegram(f"┌──────────────────────┐\n│  ⏳  PENDING SIGNALS  │\n└──────────────────────┘\n\n  ⚪ No pending signals.\n\n  🕐 {get_ist_time()}")
+                    elif txt=="📈 stats":    send_telegram(get_pattern_stats_text())
+                    elif txt=="📅 summary":  send_telegram(get_10day_summary_text())
+                    elif txt=="🔥 streak":   send_telegram(get_streak_text())
+                    elif txt=="🏆 best":     send_telegram(get_best_text())
+                    elif txt=="🛡️ risk":     send_telegram(get_risk_text())
+                    elif txt=="🧠 learn":    send_telegram(get_learning_text())
+                    elif txt=="📓 journal":  send_telegram(get_journal_text())
+                    elif txt=="🌀 patterns": send_telegram(get_patterns_ranked_text())
                     elif txt=="📰 news":
-                        send_telegram(f"<b>{BOT_HEADER}</b>\nFetching news...")
+                        send_telegram(f"  📰 Fetching latest news...")
                         send_telegram(get_crypto_news())
-                    elif txt=="🌍 market":    send_telegram(cmd_market())
+                    elif txt=="🌍 market":   send_telegram(cmd_market())
                     elif txt=="🔍 scan":
-                        send_telegram(f"<b>{BOT_HEADER}</b>\nManual scan started...")
-                        threading.Thread(target=lambda: scan_coins(1,get_fear_greed_index(),
-                            detect_market_condition(get_price("BTCUSDT") or 0,
-                            get_klines("BTCUSDT","1h",100) or [])),daemon=True).start()
-                    elif txt=="⚡ cb status": send_telegram(
-                        f"<b>{BOT_HEADER} Circuit Breaker</b>\n{S()}\n"
-                        f"Status: {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
-                        f"Daily Losses: {daily_losses}/{MAX_DAILY_LOSSES}\n"
-                        f"Resets: Midnight IST"
-                    )
+                        btc_p2=get_price("BTCUSDT"); btc_k2=get_klines("BTCUSDT","1h",50)
+                        bt_e2=calculate_ema([float(x[4]) for x in btc_k2],50) if btc_k2 else None
+                        bt2=1 if (btc_p2 and bt_e2 and btc_p2>bt_e2) else -1
+                        fg2=get_fear_greed_index(); mc2=detect_market_condition(btc_p2,btc_k2) if btc_p2 and btc_k2 else "sideways"
+                        send_telegram(cmd_scan_manual(bt2,fg2,mc2))
+                    elif txt=="⚡ cb status":
+                        cb_active=check_circuit_breaker()
+                        send_telegram(
+                            f"┌──────────────────────────────────┐\n"
+                            f"│  ⚡  CIRCUIT BREAKER STATUS      │\n"
+                            f"└──────────────────────────────────┘\n\n"
+                            f"  Status   : {'🔴 ACTIVE — scanning paused' if cb_active else '🟢 OK — scanning active'}\n"
+                            f"  Losses   : {daily_losses}/{MAX_DAILY_LOSSES}\n"
+                            f"  Resets   : Midnight IST\n\n"
+                            f"  🕐 {get_ist_time()}"
+                        )
                     elif txt=="🔔 alerts":
                         if price_alerts:
-                            msg=f"<b>{BOT_HEADER} Price Alerts</b>\n{S()}\n\n"
-                            for a in price_alerts: msg+=f"🔔 {a['coin']} {a['condition']} {a['price']}\n"
+                            msg=(f"┌──────────────────────────────────┐\n"
+                                 f"│  🔔  PRICE ALERTS ({len(price_alerts)})             │\n"
+                                 f"└──────────────────────────────────┘\n\n")
+                            for sym,a in price_alerts.items():
+                                msg+=f"  🔔 <b>{sym}</b>  {a['direction'].upper()}  <code>{format_price(a['price'])}</code>\n"
+                            msg+=f"\n  ➕ Add: /alert BTC 95000 above\n  🕐 {get_ist_time()}"
                             send_telegram(msg)
-                        else: send_telegram(f"<b>{BOT_HEADER}</b>\nNo active alerts.\nUse: /alert BTC 95000 above")
+                        else:
+                            send_telegram(f"┌──────────────────────┐\n│  🔔  PRICE ALERTS    │\n└──────────────────────┘\n\n  ⚪ No alerts set.\n\n  ➕ /alert BTC 95000 above\n  🕐 {get_ist_time()}")
         except requests.RequestException as e: logger.error(f"Poll network: {e}")
         except Exception as e:                 logger.error(f"Poll error: {e}",exc_info=True)
         time.sleep(2)
@@ -1617,6 +1832,7 @@ def main():
     global last_batch_time,last_river_time,last_hourly_time,last_pnl_update_time,last_weekly_report_day
     load_active_trades(); load_trade_history(); load_journal()
     load_learning(); load_alerts(); load_circuit_breaker()
+    load_pending_signals()
     threading.Thread(target=poll_telegram,daemon=True).start()
     logger.info(f"{BOT_NAME} {BOT_VERSION} starting...")
     send_telegram(
@@ -1628,7 +1844,7 @@ def main():
         f"📊 4h + 1h Trend Filter\n"
         f"🌀 SuperTrend (15m + 1h)\n"
         f"📈 ADX Min: <b>{ADX_MIN_TREND}</b>\n"
-        f"💧 DOL Liquidity Indicator\n"
+        f"💧 VWAP Institutional Filter\n"
         f"📍 Supply & Demand Zones\n"
         f"📊 VWAP Institutional Filter\n"
         f"🔀 RSI Divergence Detection\n"
