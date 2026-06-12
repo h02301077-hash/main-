@@ -15,8 +15,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -1624,12 +1624,12 @@ def cmd_compare(coins_str):
 def cmd_scan_manual(btc_trend,fng,market_condition):
     send_telegram(
         f"{_H('SCANNING NOW','🔍')}\n\n"
-        f"  ⚙️ Scanning {len(COINS[:30])} coins...\n"
+        f"  ⚙️ Scanning {len(COINS)} coins...\n"
         f"  📊 Market: {market_condition.upper()}  F&G: {fng}\n"
         f"  🕐 {get_ist_time()}"
     )
     results=[]
-    for coin in COINS[:30]:
+    for coin in COINS:
         try:
             symbol=coin+"USDT"; price=get_price(symbol); klines=get_klines(symbol,"15m",100)
             if not price or not klines: continue
@@ -2199,6 +2199,7 @@ def poll_telegram():
                 elif "message" in update:
                     txt=update["message"].get("text","").strip().lower()
                     txt_slash=txt  # for slash commands (already lowercase)
+                    txt_clean = txt.replace('\ufe0f','').replace('\ufe0e','').strip()
                     if   txt_slash=="/trades":   safe_send(get_active_trades_text,"📊 Trades")
                     elif txt_slash=="/pending":
                         if pending_signals:
@@ -2309,9 +2310,7 @@ def poll_telegram():
                         # handled by txt_clean block below — trigger it
                         pass
                     # ── Reply keyboard button tap handlers ──
-                    # Strip variation selectors from txt for robust matching
-                    txt_clean = txt.replace('\ufe0f','').replace('\ufe0e','').strip()
-                    if   txt_clean=="📊 trades":   safe_send(get_active_trades_text,"📊 Trades")
+                    elif txt_clean=="📊 trades":   safe_send(get_active_trades_text,"📊 Trades")
                     elif txt_clean=="⏳ pending":
                         if pending_signals:
                             msg=f"{_H('PENDING SIGNALS','⏳')}\n\n"
