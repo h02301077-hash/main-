@@ -15,8 +15,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -37,7 +37,8 @@ COINS = list(dict.fromkeys([
     "AR","THETA","LPT","AKT","SAND","MANA","AXS","GALA","CHZ","APE",
     "GMT","ENJ","PEPE","WIF","FLOKI","BONK","ORDI","BOME","NOT","DOGS",
     "JUP","PYTH","JTO","STRK","EIGEN","ETHFI","IO","ZERO","ONDO",
-    "BLUR","CFX","METIS","MANTA","ZETA","TRB","ALT","PIXEL","PORTAL","STPT","KAS"
+    "BLUR","CFX","METIS","MANTA","ZETA","TRB","ALT","PIXEL","PORTAL","STPT","KAS",
+    "PIPPIN","BSB","CL"
 ]))
 
 active_trades             = {}
@@ -1663,6 +1664,111 @@ def cmd_scan_manual(btc_trend,fng,market_condition):
            f"  🕐 {get_ist_time()}")
     return text
 
+def cmd_hidden_gems():
+    """
+    💎 Hidden Gems Scanner
+    Finds coins with:
+    - Volume suddenly spiking (2x+ vs 20-bar average)
+    - Price not yet pumped (within 5% of recent lows)
+    - Early momentum building (RSI 40-60, not overbought)
+    - Increasing OI (smart money entering)
+    """
+    send_telegram(
+        f"{_H('SCANNING FOR HIDDEN GEMS','💎')}\n\n"
+        f"  ⚙️ Analysing {len(COINS)} coins...\n"
+        f"  🔍 Looking for volume spikes + early momentum\n"
+        f"  🕐 {get_ist_time()}"
+    )
+    gems = []; vol_spikes = []; unpumped = []; early_mom = []
+    for coin in COINS:
+        try:
+            symbol = coin + "USDT"
+            price  = get_price(symbol)
+            if not price: continue
+            klines = get_klines(symbol, "1h", 50)
+            if not klines or len(klines) < 30: continue
+            closes = [float(k[4]) for k in klines]
+            highs  = [float(k[2]) for k in klines]
+            lows   = [float(k[3]) for k in klines]
+            vols   = [float(k[5]) for k in klines]
+            avg_vol_20 = sum(vols[-20:]) / 20
+            curr_vol   = vols[-1]
+            vol_ratio  = curr_vol / avg_vol_20 if avg_vol_20 > 0 else 0
+            rsi        = calculate_rsi(closes)
+            ema20      = calculate_ema(closes, 20)
+            ema50      = calculate_ema(closes, 50)
+            # Price change 24h
+            chg_24h = ((closes[-1] - closes[-24]) / closes[-24] * 100) if len(closes) >= 24 else 0
+            # Distance from recent low (last 48 bars)
+            recent_low  = min(lows[-48:])
+            dist_low_pct = ((price - recent_low) / recent_low * 100) if recent_low > 0 else 999
+            # Volume spike: current vol > 2x average AND price moved up
+            if vol_ratio >= 2.0 and closes[-1] > closes[-2] and chg_24h < 15:
+                vol_spikes.append({
+                    "coin": coin, "vol_ratio": vol_ratio,
+                    "price": price, "chg_24h": chg_24h, "rsi": rsi
+                })
+            # Unpumped: near recent lows, volume starting to build, RSI neutral
+            if dist_low_pct < 8 and vol_ratio >= 1.3 and 35 <= rsi <= 58:
+                unpumped.append({
+                    "coin": coin, "dist_low": dist_low_pct,
+                    "price": price, "vol_ratio": vol_ratio, "rsi": rsi
+                })
+            # Early momentum: EMA20 crossing above EMA50, RSI rising from neutral
+            if ema20 and ema50 and ema20 > ema50 and 45 <= rsi <= 65 and chg_24h > 1 and vol_ratio >= 1.2:
+                early_mom.append({
+                    "coin": coin, "rsi": rsi,
+                    "price": price, "chg_24h": chg_24h, "vol_ratio": vol_ratio
+                })
+            time.sleep(0.1)
+        except Exception: continue
+
+    # Sort each category
+    vol_spikes.sort(key=lambda x: x["vol_ratio"], reverse=True)
+    unpumped.sort(key=lambda x: x["dist_low"])
+    early_mom.sort(key=lambda x: x["rsi"])
+
+    msg = f"{_H('HIDDEN GEMS REPORT','💎')}\n\n"
+
+    # Volume Spikes
+    msg += f"  🚀 <b>Volume Spikes</b>  <i>(sudden activity)</i>\n"
+    if vol_spikes:
+        for g in vol_spikes[:5]:
+            bar = "█" * min(int(g["vol_ratio"]), 8)
+            msg += (f"  🔹 <b>{g['coin']}</b>  <code>{format_price(g['price'])}</code>\n"
+                    f"      Vol: {bar} {g['vol_ratio']:.1f}x avg  •  24h: {g['chg_24h']:+.1f}%  •  RSI:{g['rsi']:.0f}\n\n")
+    else:
+        msg += "  ⚪ No volume spikes right now.\n\n"
+
+    msg += f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    # Not yet pumped
+    msg += f"  💤 <b>Not Yet Pumped</b>  <i>(near lows, vol building)</i>\n"
+    if unpumped:
+        for g in unpumped[:5]:
+            msg += (f"  🔹 <b>{g['coin']}</b>  <code>{format_price(g['price'])}</code>\n"
+                    f"      {g['dist_low']:.1f}% above low  •  Vol:{g['vol_ratio']:.1f}x  •  RSI:{g['rsi']:.0f}\n\n")
+    else:
+        msg += "  ⚪ No unpumped coins found.\n\n"
+
+    msg += f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    # Early momentum
+    msg += f"  📈 <b>Early Momentum</b>  <i>(EMA cross + rising RSI)</i>\n"
+    if early_mom:
+        for g in early_mom[:5]:
+            msg += (f"  🔹 <b>{g['coin']}</b>  <code>{format_price(g['price'])}</code>\n"
+                    f"      24h: {g['chg_24h']:+.1f}%  •  Vol:{g['vol_ratio']:.1f}x  •  RSI:{g['rsi']:.0f}\n\n")
+    else:
+        msg += "  ⚪ No early momentum coins found.\n\n"
+
+    total = len(set([g["coin"] for g in vol_spikes+unpumped+early_mom]))
+    msg += (f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  💎 {total} potential gems found\n"
+            f"  ⚠️ <i>Always confirm with /trend COIN before trading</i>\n"
+            f"  🕐 {get_ist_time()}")
+    return msg
+
 def expire_pending_signals():
     now=get_ist_datetime()
     expired=[c for c,s in list(pending_signals.items()) if s.get("expires_at") and now>s["expires_at"]]
@@ -1852,9 +1958,33 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     msg += f"  {cond_icon} Market: <b>{cond_em}</b>\n\n"
 
     msg += f"  ┌── TRADE LEVELS ─────────────┐\n"
-    msg += f"  │  💰 Entry   <code>{format_price(entry)}</code>\n"
-    msg += f"  │  🎯 Target  <code>{format_price(tp)}</code>  <i>+{tp_pct:.2f}%</i>\n"
-    msg += f"  │  🛑 Stop    <code>{format_price(sl)}</code>  <i>-{sl_pct:.2f}%</i>\n"
+    msg += f"  │  💰 Entry      <code>{format_price(entry)}</code>\n"
+    msg += f"  │  🎯 Target     <code>{format_price(tp)}</code>  <i>+{tp_pct:.2f}%</i>\n"
+    msg += f"  │  🛑 Stop       <code>{format_price(sl)}</code>  <i>-{sl_pct:.2f}%</i>\n"
+    res_dist=abs(res-entry)/entry*100; sup_dist=abs(entry-sup)/entry*100
+
+    def _break_prob(dist_pct, favourable_dir):
+        """Heuristic probability that price breaks through this level."""
+        # Closer level = easier to test/break (inverse distance factor)
+        dist_score = max(0, 50 - dist_pct*8)
+        # Momentum aligned with breaking direction adds probability
+        mom_score = mom * 3 if favourable_dir else -mom * 3
+        # ADX strong trend = more likely to break levels
+        adx_score = (adx_val - 20) * 0.6
+        # Volume confirmation adds push
+        vol_score = 8 if vol_ok else -4
+        # RSI room to move
+        if favourable_dir:  # breaking up (resistance)
+            rsi_score = (rsi_val - 50) * 0.4
+        else:               # breaking down (support)
+            rsi_score = (50 - rsi_val) * 0.4
+        prob = 35 + dist_score*0.4 + mom_score + adx_score + vol_score + rsi_score
+        return max(5, min(95, prob))
+
+    res_break_pct = _break_prob(res_dist, favourable_dir=True)   # breaking resistance = upward
+    sup_break_pct = _break_prob(sup_dist, favourable_dir=False)  # breaking support = downward
+    msg += f"  │  🚧 Resistance <code>{format_price(res)}</code>  <i>{res_dist:.2f}% away</i>  •  Break: <b>{res_break_pct:.0f}%</b>\n"
+    msg += f"  │  🛡️ Support    <code>{format_price(sup)}</code>  <i>{sup_dist:.2f}% away</i>  •  Break: <b>{sup_break_pct:.0f}%</b>\n"
     msg += f"  └─────────────────────────────┘\n\n"
 
     msg += f"  📈 Max Profit : <b>+{profit_target:.1f}%</b>\n"
@@ -2068,8 +2198,9 @@ def poll_telegram():
                             send_telegram(f"❌ <b>{BOT_HEADER}</b>\n{coin} signal ignored.")
                 elif "message" in update:
                     txt=update["message"].get("text","").strip().lower()
-                    if   txt=="/trades":   safe_send(get_active_trades_text,"📊 Trades")
-                    elif txt=="/pending":
+                    txt_slash=txt  # for slash commands (already lowercase)
+                    if   txt_slash=="/trades":   safe_send(get_active_trades_text,"📊 Trades")
+                    elif txt_slash=="/pending":
                         if pending_signals:
                             msg=f"{_H('PENDING SIGNALS','⏳')}\n\n"
                             for c,s in pending_signals.items():
@@ -2081,19 +2212,20 @@ def poll_telegram():
                             msg+=f"  🕐 {get_ist_time()}"
                             send_telegram(msg)
                         else: send_telegram(f"{_H('PENDING SIGNALS','⏳')}\n\n  ⚪ No pending signals.\n\n  🕐 {get_ist_time()}")
-                    elif txt=="/stats":    safe_send(get_pattern_stats_text,"📈 Stats")
-                    elif txt=="/summary":  safe_send(get_10day_summary_text,"📅 Summary")
-                    elif txt=="/streak":   safe_send(get_streak_text,"🔥 Streak")
-                    elif txt=="/best":     safe_send(get_best_text,"🏆 Best")
-                    elif txt=="/risk":     safe_send(get_risk_text,"🛡️ Risk")
-                    elif txt=="/learn":    safe_send(get_learning_text,"🧠 Learn")
-                    elif txt=="/journal":  safe_send(get_journal_text,"📓 Journal")
-                    elif txt=="/patterns": safe_send(get_patterns_ranked_text,"🌀 Patterns")
-                    elif txt=="/news":
+                    elif txt_slash=="/stats":    safe_send(get_pattern_stats_text,"📈 Stats")
+                    elif txt_slash=="/summary":  safe_send(get_10day_summary_text,"📅 Summary")
+                    elif txt_slash=="/streak":   safe_send(get_streak_text,"🔥 Streak")
+                    elif txt_slash=="/best":     safe_send(get_best_text,"🏆 Best")
+                    elif txt_slash=="/risk":     safe_send(get_risk_text,"🛡️ Risk")
+                    elif txt_slash=="/learn":    safe_send(get_learning_text,"🧠 Learn")
+                    elif txt_slash=="/journal":  safe_send(get_journal_text,"📓 Journal")
+                    elif txt_slash=="/patterns": safe_send(get_patterns_ranked_text,"🌀 Patterns")
+                    elif txt_slash=="/news":
                         send_telegram(f"⚙️ Fetching latest news...")
                         safe_send(get_crypto_news,"📰 News")
-                    elif txt=="/market":   safe_send(cmd_market,"🌍 Market")
-                    elif txt=="/cb":
+                    elif txt_slash=="/gems":    safe_send(cmd_hidden_gems,"💎 Hidden Gems")
+                    elif txt_slash=="/market":   safe_send(cmd_market,"🌍 Market")
+                    elif txt_slash=="/cb":
                         cb_on=check_circuit_breaker()
                         send_telegram(
                             f"{_H('CIRCUIT BREAKER','⚡')}\n\n"
@@ -2102,19 +2234,19 @@ def poll_telegram():
                             f"  Resets   : Midnight IST\n\n"
                             f"  🕐 {get_ist_time()}"
                         )
-                    elif txt.startswith("/trend"):
+                    elif txt_slash.startswith("/trend"):
                         parts=txt.split(); coin2=parts[1].upper() if len(parts)>1 else "BTC"
                         safe_send(lambda: cmd_trend(coin2),"📉 Trend")
-                    elif txt.startswith("/compare"):
+                    elif txt_slash.startswith("/compare"):
                         parts=txt.split(maxsplit=1); coins_str=parts[1].upper() if len(parts)>1 else "BTC ETH SOL"
                         safe_send(lambda: cmd_compare(coins_str),"🆚 Compare")
-                    elif txt=="/scan":
+                    elif txt_slash=="/scan":
                         btc_p=get_price("BTCUSDT"); btc_k=get_klines("BTCUSDT","1h",50)
                         bt_e50=calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
                         bt=1 if (btc_p and bt_e50 and btc_p>bt_e50) else -1
                         fng2=get_fear_greed_index(); mc2=detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "sideways"
                         send_telegram(cmd_scan_manual(bt,fng2,mc2))
-                    elif txt.startswith("/alert "):
+                    elif txt_slash.startswith("/alert "):
                         parts=txt.split()
                         if len(parts)>=4:
                             try:
@@ -2123,34 +2255,31 @@ def poll_telegram():
                                 send_telegram(f"🔔 Alert set: {sym} {direction} {format_price(target)}")
                             except Exception: send_telegram("Usage: /alert BTC 95000 above")
                         else: send_telegram("Usage: /alert BTC 95000 above")
-                    elif txt=="/alerts":
+                    elif txt_slash=="/alerts":
                         if price_alerts:
                             msg=f"<b>{BOT_HEADER} Alerts</b>\n{S()}\n\n"
                             for sym,a in price_alerts.items(): msg+=f"{sym}: {a['direction']} {format_price(a['price'])}\n"
                             send_telegram(msg)
                         else: send_telegram(f"<b>{BOT_HEADER}</b>\nNo alerts set.")
-                    elif txt.startswith("/backtest"):
+                    elif txt_slash.startswith("/backtest"):
                         parts=txt.split(); bc=(parts[1].upper() if len(parts)>1 else "BTC")+"USDT"
                         send_telegram(f"Running backtest for {bc}...")
                         send_telegram(run_backtest(bc))
-                    elif txt in ("/start","/help","/menu"):
+                    elif txt_slash in ("/start","/help","/menu"):
                         menu_kb={
                             "keyboard":[
                                 [{"text":"📊 Trades"},   {"text":"⏳ Pending"},   {"text":"📈 Stats"}],
                                 [{"text":"📅 Summary"},  {"text":"🔥 Streak"},    {"text":"🏆 Best"}],
-                                [{"text":"🛡️ Risk"},     {"text":"🧠 Learn"},     {"text":"📓 Journal"}],
+                                [{"text":"🛡 Risk"},     {"text":"🧠 Learn"},     {"text":"📓 Journal"}],
                                 [{"text":"🌀 Patterns"}, {"text":"📰 News"},      {"text":"🌍 Market"}],
                                 [{"text":"🔍 Scan"},     {"text":"⚡ CB Status"}, {"text":"📡 Status"}],
-                                [{"text":"🔔 Alerts"},   {"text":"📉 Trend BTC"}, {"text":"🔬 Backtest BTC"}],
+                                [{"text":"🔔 Alerts"},   {"text":"📉 Trend BTC"}, {"text":"💎 Hidden Gems"}],
                             ],
                             "resize_keyboard":True,
                             "persistent":True
                         }
                         send_telegram(
-                            f"┌──────────────────────────────────┐\n"
-                            f"│  ⚙️  TRADING SIGNAL MASTER v32G  │\n"
-                            f"│     Smart • Fast • Accurate       │\n"
-                            f"└──────────────────────────────────┘\n\n"
+                            f"{_H('TRADING SIGNAL MASTER v32G','⚙️')}\n\n"
                             f"  Tap a button or type a command:\n\n"
                             f"  📊 /trades    — Active trades\n"
                             f"  ⏳ /pending   — Pending signals\n"
@@ -2158,7 +2287,7 @@ def poll_telegram():
                             f"  📅 /summary   — 10-day summary\n"
                             f"  🔥 /streak    — Win/loss streak\n"
                             f"  🏆 /best      — Top performers\n"
-                            f"  🛡️ /risk      — Risk exposure\n"
+                            f"  🛡 /risk      — Risk exposure\n"
                             f"  🧠 /learn     — Bot insights\n"
                             f"  📓 /journal   — Trade journal\n"
                             f"  🌀 /patterns  — Patterns ranked\n"
@@ -2170,72 +2299,53 @@ def poll_telegram():
                             f"  🔔 /alerts    — Price alerts\n"
                             f"  📉 /trend BTC — Trend analysis\n"
                             f"  🆚 /compare BTC ETH — Compare\n"
+                            f"  💎 /gems      — Hidden gems scan\n"
                             f"  🔬 /backtest BTC — Backtest\n\n"
                             f"  🕐 {get_ist_time()}",
                             reply_markup=menu_kb
                         )
                     # ── /status + 📡 Status button ──
-                    elif txt in ("/status","📡 status"):
-                        btc_p=get_price("BTCUSDT"); fng=get_fear_greed_index()
-                        btc_k=get_klines("BTCUSDT","1h",50)
-                        bt_e=calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
-                        bt=1 if (btc_p and bt_e and btc_p>bt_e) else -1
-                        mc=detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "unknown"
-                        sess=is_good_trading_session(); cb=check_circuit_breaker()
-                        btc_crash=is_btc_crashing()
-                        send_telegram(
-                            f"┌──────────────────────────────────┐\n"
-                            f"│  🔍  LIVE BOT STATUS             │\n"
-                            f"└──────────────────────────────────┘\n\n"
-                            f"  {'✅' if sess else '🔴'} Trading Session : {'ACTIVE' if sess else 'DEAD (2-7AM IST)'}\n"
-                            f"  {'✅' if not cb else '🔴'} Circuit Breaker : {'OK' if not cb else 'ACTIVE — paused'}\n"
-                            f"  {'✅' if not btc_crash else '🔴'} BTC Crash Guard : {'OK' if not btc_crash else 'BTC CRASHING'}\n"
-                            f"  {'🟢' if bt==1 else '🔴'} BTC Trend       : {'BULLISH ▲' if bt==1 else 'BEARISH ▼'}\n"
-                            f"  📊 Market        : {mc.upper()}\n"
-                            f"  😰 Fear & Greed  : {fng}\n"
-                            f"  📌 Active Trades : {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
-                            f"  ⏳ Pending       : {len(pending_signals)}\n"
-                            f"  🔒 Cooldowns     : {len(coin_cooldowns)} coins\n"
-                            f"  📉 Daily Losses  : {daily_losses}/{MAX_DAILY_LOSSES}\n"
-                            f"  🎯 Min Score     : {MIN_SETUP_SCORE}\n\n"
-                            f"  {'🟢 Bot CAN send signals now' if sess and not cb else '🔴 Bot BLOCKED — check flags above'}\n\n"
-                            f"  🕐 {get_ist_time()}"
-                        )
+                    elif txt_slash in ("/status","📡 status"):
+                        # handled by txt_clean block below — trigger it
+                        pass
                     # ── Reply keyboard button tap handlers ──
-                    elif txt=="📊 trades":  safe_send(get_active_trades_text,"📊 Trades")
-                    elif txt=="⏳ pending":
+                    # Strip variation selectors from txt for robust matching
+                    txt_clean = txt.replace('\ufe0f','').replace('\ufe0e','').strip()
+                    if   txt_clean=="📊 trades":   safe_send(get_active_trades_text,"📊 Trades")
+                    elif txt_clean=="⏳ pending":
                         if pending_signals:
-                            msg=(f"{_H('PENDING SIGNALS','⏳')}\n\n")
+                            msg=f"{_H('PENDING SIGNALS','⏳')}\n\n"
                             for c,s in pending_signals.items():
                                 exp=s.get("expires_at")
                                 exp_str=exp.strftime("%I:%M %p IST") if isinstance(exp,datetime) else "N/A"
                                 dirn_em="🟢 LONG" if s.get("direction")=="BUY" else "🔴 SHORT"
                                 msg+=(f"  🪙 <b>{c}</b>  {dirn_em}\n"
                                       f"  ◆ {s.get('pattern','?')}\n"
-                                      f"  Score: {s.get('setup_score',0):.0f}  ⏰ Exp: {exp_str}\n\n")
+                                      f"  Score: {s.get('setup_score',0):.0f}  ⏰ {exp_str}\n\n")
                             msg+=f"  🕐 {get_ist_time()}"
                             send_telegram(msg)
                         else:
                             send_telegram(f"{_H('PENDING SIGNALS','⏳')}\n\n  ⚪ No pending signals right now.\n\n  🕐 {get_ist_time()}")
-                    elif txt=="📈 stats":    safe_send(get_pattern_stats_text,"📈 Stats")
-                    elif txt=="📅 summary":  safe_send(get_10day_summary_text,"📅 Summary")
-                    elif txt=="🔥 streak":   safe_send(get_streak_text,"🔥 Streak")
-                    elif txt=="🏆 best":     safe_send(get_best_text,"🏆 Best")
-                    elif txt=="🛡️ risk":     safe_send(get_risk_text,"🛡️ Risk")
-                    elif txt=="🧠 learn":    safe_send(get_learning_text,"🧠 Learn")
-                    elif txt=="📓 journal":  safe_send(get_journal_text,"📓 Journal")
-                    elif txt=="🌀 patterns": safe_send(get_patterns_ranked_text,"🌀 Patterns")
-                    elif txt=="📰 news":
-                        send_telegram(f"⚙️ Fetching latest news...")
+                    elif txt_clean=="📈 stats":    safe_send(get_pattern_stats_text,"📈 Stats")
+                    elif txt_clean=="📅 summary":  safe_send(get_10day_summary_text,"📅 Summary")
+                    elif txt_clean=="🔥 streak":   safe_send(get_streak_text,"🔥 Streak")
+                    elif txt_clean=="🏆 best":     safe_send(get_best_text,"🏆 Best")
+                    elif txt_clean in ("🛡️ risk","🛡 risk"):  safe_send(get_risk_text,"🛡 Risk")
+                    elif txt_clean=="🧠 learn":    safe_send(get_learning_text,"🧠 Learn")
+                    elif txt_clean=="📓 journal":  safe_send(get_journal_text,"📓 Journal")
+                    elif txt_clean=="🌀 patterns": safe_send(get_patterns_ranked_text,"🌀 Patterns")
+                    elif txt_clean=="📰 news":
+                        send_telegram("⚙️ Fetching latest news...")
                         safe_send(get_crypto_news,"📰 News")
-                    elif txt=="🌍 market":   safe_send(cmd_market,"🌍 Market")
-                    elif txt=="🔍 scan":
+                    elif txt_clean=="🌍 market":   safe_send(cmd_market,"🌍 Market")
+                    elif txt_clean=="🔍 scan":
                         btc_p2=get_price("BTCUSDT"); btc_k2=get_klines("BTCUSDT","1h",50)
                         bt_e2=calculate_ema([float(x[4]) for x in btc_k2],50) if btc_k2 else None
                         bt2=1 if (btc_p2 and bt_e2 and btc_p2>bt_e2) else -1
-                        fg2=get_fear_greed_index(); mc2=detect_market_condition(btc_p2,btc_k2) if btc_p2 and btc_k2 else "sideways"
+                        fg2=get_fear_greed_index()
+                        mc2=detect_market_condition(btc_p2,btc_k2) if btc_p2 and btc_k2 else "sideways"
                         safe_send(lambda: cmd_scan_manual(bt2,fg2,mc2),"🔍 Scan")
-                    elif txt=="⚡ cb status":
+                    elif txt_clean in ("⚡ cb status","⚡ cb"):
                         cb_on=check_circuit_breaker()
                         send_telegram(
                             f"{_H('CIRCUIT BREAKER','⚡')}\n\n"
@@ -2244,7 +2354,31 @@ def poll_telegram():
                             f"  Resets   : Midnight IST\n\n"
                             f"  🕐 {get_ist_time()}"
                         )
-                    elif txt=="🔔 alerts":
+                    elif txt_clean in ("📡 status","📡status"):
+                        btc_p=get_price("BTCUSDT"); fng=get_fear_greed_index()
+                        btc_k=get_klines("BTCUSDT","1h",50)
+                        bt_e=calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
+                        bt=1 if (btc_p and bt_e and btc_p>bt_e) else -1
+                        mc=detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "unknown"
+                        sess=is_good_trading_session(); cb=check_circuit_breaker()
+                        btc_crash=is_btc_crashing()
+                        send_telegram(
+                            f"{_H('LIVE BOT STATUS','📡')}\n\n"
+                            f"  {'✅' if sess else '🔴'} Session    : {'ACTIVE' if sess else 'DEAD (2-7AM IST)'}\n"
+                            f"  {'✅' if not cb else '🔴'} CB         : {'OK' if not cb else 'ACTIVE — paused'}\n"
+                            f"  {'✅' if not btc_crash else '🔴'} BTC Crash  : {'OK' if not btc_crash else 'CRASHING'}\n"
+                            f"  {'🟢' if bt==1 else '🔴'} BTC Trend  : {'BULLISH ▲' if bt==1 else 'BEARISH ▼'}\n"
+                            f"  📊 Market   : {mc.upper()}\n"
+                            f"  😰 F&G      : {fng}\n"
+                            f"  📌 Trades   : {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
+                            f"  ⏳ Pending  : {len(pending_signals)}\n"
+                            f"  🔒 Cooldowns: {len(coin_cooldowns)} coins\n"
+                            f"  📉 Losses   : {daily_losses}/{MAX_DAILY_LOSSES}\n"
+                            f"  🎯 Min Score: {MIN_SETUP_SCORE}\n\n"
+                            f"  {'🟢 Bot CAN send signals' if sess and not cb else '🔴 Bot BLOCKED'}\n\n"
+                            f"  🕐 {get_ist_time()}"
+                        )
+                    elif txt_clean=="🔔 alerts":
                         if price_alerts:
                             msg=f"{_H('PRICE ALERTS','🔔')}\n\n"
                             for sym,a in price_alerts.items():
@@ -2253,13 +2387,15 @@ def poll_telegram():
                             send_telegram(msg)
                         else:
                             send_telegram(f"{_H('PRICE ALERTS','🔔')}\n\n  ⚪ No alerts set.\n\n  ➕ /alert BTC 95000 above\n  🕐 {get_ist_time()}")
-                    elif txt=="📉 trend btc" or txt.startswith("📉 trend"):
-                        parts=txt.split(); coin_t=(parts[-1].upper() if len(parts)>1 else "BTC")+"USDT"
+                    elif txt_clean.startswith("📉 trend"):
+                        parts=txt_clean.split(); coin_t=(parts[-1].upper() if len(parts)>1 and parts[-1].upper()!="TREND" else "BTC")+"USDT"
                         safe_send(lambda: cmd_trend(coin_t),"📉 Trend")
-                    elif txt.startswith("🔬 backtest"):
-                        parts=txt.split(); bc2=(parts[-1].upper() if len(parts)>1 else "BTC")+"USDT"
+                    elif txt_clean.startswith("🔬 backtest"):
+                        parts=txt_clean.split(); bc2=(parts[-1].upper() if len(parts)>1 and parts[-1].upper()!="BACKTEST" else "BTC")+"USDT"
                         send_telegram(f"🔬 Running backtest for <b>{bc2}</b>...")
                         safe_send(lambda: run_backtest(bc2),"🔬 Backtest")
+                    elif txt_clean in ("💎 hidden gems","/gems"):
+                        safe_send(cmd_hidden_gems,"💎 Hidden Gems")
         except requests.RequestException as e: logger.error(f"Poll network: {e}")
         except Exception as e:                 logger.error(f"Poll error: {e}",exc_info=True)
         time.sleep(2)
