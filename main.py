@@ -15,8 +15,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
 NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
@@ -1897,6 +1897,9 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     tf_score=setup.get("tf_score",get_timeframe_score(setup["symbol"],setup["direction"]))
     ob_imbalance, ob_label = get_orderbook_imbalance(setup["symbol"])
     ms = detect_market_structure(klines_15m)
+    highs_15m=[float(k[2]) for k in klines_15m]; lows_15m=[float(k[3]) for k in klines_15m]
+    res = ms["swing_high"] if ms["swing_high"] > 0 else max(highs_15m[-30:-1])
+    sup = ms["swing_low"]  if ms["swing_low"]  > 0 else min(lows_15m[-30:-1])
     # Compute grade FIRST so leverage can use it
     grade_result=get_signal_grade(setup["setup_score"],whale,oi_rising,tf_score,vol_ok,rsi_ok,funding_ok,st_ok,vwap_ok,zone_ok,adx_val,ob_imbalance,ms["bias"],ms["bos"])
     grade,pts,breakdown=grade_result
