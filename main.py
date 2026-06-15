@@ -15,9 +15,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
-NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "f9cad228544447a5a8c283082747b803")      # CryptoPanic API key (optional)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
+NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
 BINANCE_KLINE_URL   = "https://data-api.binance.vision/api/v3/klines"
@@ -1283,7 +1283,8 @@ def get_active_trades_text():
             total_pnl+=pnl; pnl_txt=fmt_pnl(pnl)
         else: pnl_txt="⏳"
         ms=t.get("milestones_sent",[])
-        badge=("  🚀 +35% REACHED" if "p35" in ms else "  🔥 +20% REACHED" if "p20" in ms else "  ✅ +10% REACHED" if "p10" in ms else "")
+        badge=("  🚀 M3 LOCKED" if "p3" in ms else "  🔥 M2 LOCKED" if "p2" in ms else "  ✅ M1 BREAKEVEN" if "p1" in ms else "")
+        target=t.get("profit_target", abs(t['tp']-t['entry'])/t['entry']*100*lev)
         partial="  💰 Partial TP" if t.get("partial_tp_taken") else ""
         lines.append(
             f"  ┌─────────────────────────────┐\n"
@@ -1292,7 +1293,7 @@ def get_active_trades_text():
             f"  │  🎯 Target : <code>{format_price(t['tp'])}</code>  ↑{tp_pct:.2f}%\n"
             f"  │  🛑 Stop   : <code>{format_price(t['sl'])}</code>  ↓{sl_pct:.2f}%\n"
             f"  │  ⚖️  RR 1:{rr}   ⏱️ {dur or 'just now'}\n"
-            f"  │  📈 PnL    : {pnl_txt}{partial}\n"
+            f"  │  📈 PnL    : {pnl_txt}  🎯Target:+{target:.1f}%{partial}\n"
             f"  │  📌 {pat}{badge}\n"
             f"  └─────────────────────────────┘"
         )
@@ -1764,8 +1765,79 @@ def cmd_hidden_gems():
 
     total = len(set([g["coin"] for g in vol_spikes+unpumped+early_mom]))
     msg += (f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"  💎 {total} potential gems found\n"
-            f"  ⚠️ <i>Always confirm with /trend COIN before trading</i>\n"
+            f"  💎 {total} potential gems found\n")
+
+    # ── BEST PICK — highest-confidence tradeable setup among all gems ──
+    candidate_coins = list(dict.fromkeys(
+        [g["coin"] for g in vol_spikes] + [g["coin"] for g in unpumped] + [g["coin"] for g in early_mom]
+    ))
+    best=None
+    btc_p=get_price("BTCUSDT"); btc_k=get_klines("BTCUSDT","1h",50)
+    bt_e=calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
+    btc_trend=1 if (btc_p and bt_e and btc_p>bt_e) else -1
+    mc = detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "sideways"
+    for coin in candidate_coins[:25]:
+        try:
+            symbol=coin+"USDT"; price=get_price(symbol)
+            klines=get_klines(symbol,"15m",100)
+            if not price or not klines or len(klines)<50: continue
+            found=detect_patterns(symbol,klines,price,btc_trend)
+            if not found: continue
+            scored=get_all_pattern_scores(found,mc)
+            if not scored: continue
+            top=scored[0]; adj_score=min(top[1]+min(len(scored)*0.5,3),99)
+            if adj_score<MIN_SETUP_SCORE: continue
+            tf_score=get_timeframe_score(symbol,top[2])
+            if tf_score==-1: continue
+            if best is None or adj_score>best["score"]:
+                best={"coin":coin,"symbol":symbol,"price":price,"klines":klines,
+                      "direction":top[2],"pattern":top[0],"score":adj_score,"tf_score":tf_score}
+        except Exception: continue
+        time.sleep(0.05)
+
+    if best:
+        klines_15m=best["klines"]; entry=best["price"]
+        atr_1h_klines=get_klines(best["symbol"],"1h",30)
+        atr_1h=calculate_atr(atr_1h_klines) if atr_1h_klines else calculate_atr(klines_15m)
+        atr_pct=(atr_1h/entry)*100 if entry>0 else 0
+        sl=get_structure_sl(klines_15m,best["direction"],entry,atr_1h)
+        tp=entry+atr_1h*ATR_TP_MULTIPLIER if best["direction"]=="BUY" else entry-atr_1h*ATR_TP_MULTIPLIER
+        ms_b=detect_market_structure(klines_15m)
+        whale=has_whale_activity(best["symbol"])
+        oi_rising=get_oi_trend(best["symbol"])
+        adx_val=calculate_adx(klines_15m)
+        closes=[float(k[4]) for k in klines_15m]
+        rsi_val=calculate_rsi(closes)
+        vol_ok=is_volume_confirmed(klines_15m)
+        rsi_ok=35<=rsi_val<=65 if best["direction"]=="BUY" else 35<=rsi_val<=65
+        funding_ok=True
+        vwap=calculate_vwap(klines_15m); vwap_ok=(entry>vwap if best["direction"]=="BUY" else entry<vwap) if vwap else False
+        st_15m=calculate_supertrend(klines_15m,ST_PERIOD,ST_MULTIPLIER)
+        st_ok=(st_15m==best["direction"])
+        zone_ok=False
+        ob_imb,_=get_orderbook_imbalance(best["symbol"])
+        grade,pts,_=get_signal_grade(best["score"],whale,oi_rising,best["tf_score"],vol_ok,rsi_ok,funding_ok,st_ok,vwap_ok,zone_ok,adx_val,ob_imb,ms_b["bias"],ms_b["bos"])
+        lev=get_smart_leverage(best["symbol"],atr_pct,best["score"],grade)
+        profit_target=(abs(tp-entry)/entry)*100*lev
+        sl_pct=abs(entry-sl)/entry*100; tp_pct=abs(tp-entry)/entry*100
+        rr=tp_pct/sl_pct if sl_pct>0 else 0
+        dir_arrow="🟢 LONG ▲" if best["direction"]=="BUY" else "🔴 SHORT ▼"
+        grade_em="🏆" if "A+" in grade else "🍀" if " A" in grade else "🥈" if "B" in grade else "🥉"
+        msg += (f"\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"  ⭐ <b>BEST PICK RIGHT NOW</b>  {grade_em}\n"
+                f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"  🪙 <b>{best['coin']}</b>  {dir_arrow}  ✦ {lev}x\n"
+                f"  {grade_em} {grade}  •  Score {best['score']:.0f}/100\n"
+                f"  📌 {best['pattern']}\n\n"
+                f"  💰 Entry  : <code>{format_price(entry)}</code>\n"
+                f"  🎯 Target : <code>{format_price(tp)}</code>  +{tp_pct:.2f}%\n"
+                f"  🛑 Stop   : <code>{format_price(sl)}</code>  -{sl_pct:.2f}%\n"
+                f"  ⚖️ RR 1:{rr:.1f}  •  📈 Max Profit +{profit_target:.1f}%\n\n"
+                f"  💡 Type <code>/trend {best['coin']}</code> to confirm before entering.\n")
+    else:
+        msg += f"\n  ⭐ <b>BEST PICK</b>: No setup ≥{MIN_SETUP_SCORE} found among gems right now.\n"
+
+    msg += (f"  ⚠️ <i>Always confirm before trading</i>\n"
             f"  🕐 {get_ist_time()}")
     return msg
 
@@ -1817,37 +1889,59 @@ def update_trailing_sl(coin,trade,price):
         if new_sl<trade["sl"]: active_trades[coin]["sl"]=new_sl; save_active_trades()
 
 def check_profit_milestones(coin,trade,price,pnl):
+    """
+    Proportional milestone system — scales with the trade's ACTUAL profit target,
+    not a fixed +10/+20/+35. A 70% target gets milestones at 21/42/59.5%.
+    Each milestone locks in a growing share of the gain reached so far.
+    """
     milestones=trade.get("milestones_sent",[])
-    ep=trade["entry"]; tp=trade["tp"]; direction=trade["direction"]
-    if direction=="BUY":
-        sl_10=format_price(ep)
-        sl_20=format_price(ep+(tp-ep)*0.5)
-        sl_35=format_price(ep+(tp-ep)*0.75)
-    else:
-        sl_10=format_price(ep)
-        sl_20=format_price(ep-(ep-tp)*0.5)
-        sl_35=format_price(ep-(ep-tp)*0.75)
-    def _ms(icon,title,detail,sl_txt):
+    ep=trade["entry"]; direction=trade["direction"]; lev=trade.get("leverage",1)
+    target=trade.get("profit_target", abs(trade["tp"]-ep)/ep*100*lev)
+    if target<=0: target=10  # safety fallback
+
+    m1=target*0.30; m2=target*0.60; m3=target*0.85
+
+    def _price_at_pnl(target_pnl):
+        move = ep * (target_pnl/100) / lev
+        return ep+move if direction=="BUY" else ep-move
+
+    def _sl_lock_price(target_pnl, lock_ratio):
+        gain_price = abs(_price_at_pnl(target_pnl) - ep)
+        locked = gain_price * lock_ratio
+        return ep+locked if direction=="BUY" else ep-locked
+
+    def _ms(icon,title,detail,sl_price):
         return (f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{icon} <b>{title}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"  🪙 Coin    : <b>{coin}</b>\n"
                 f"  📈 PnL     : {fmt_pnl(pnl)}\n"
-                f"  🛑 Move SL : <code>{sl_txt}</code>\n"
+                f"  🎯 Target  : +{target:.1f}%\n"
+                f"  🛑 Move SL : <code>{format_price(sl_price)}</code>\n"
                 f"  💡 {detail}\n"
                 f"  🕐 {get_ist_time()}")
-    if 10<=pnl<20 and "p10" not in milestones:
-        active_trades[coin].setdefault("milestones_sent",[]).append("p10")
+
+    if pnl>=m1 and "p1" not in milestones:
+        sl_price=_sl_lock_price(m1,0.0)  # breakeven
+        active_trades[coin].setdefault("milestones_sent",[]).append("p1")
+        active_trades[coin]["sl"]=sl_price
         save_active_trades()
-        send_telegram(_ms("✅","PROFIT MILESTONE  +10%","Move SL to entry — trade is risk-free!",sl_10))
-    elif 20<=pnl<35 and "p20" not in milestones:
-        active_trades[coin].setdefault("milestones_sent",[]).append("p20")
+        send_telegram(_ms("✅",f"MILESTONE 1  •  +{m1:.1f}% reached",
+                          "SL moved to breakeven — trade is now risk-free!",sl_price))
+    elif pnl>=m2 and "p2" not in milestones:
+        sl_price=_sl_lock_price(m2,0.5)
+        active_trades[coin].setdefault("milestones_sent",[]).append("p2")
+        active_trades[coin]["sl"]=sl_price
         save_active_trades()
-        send_telegram(_ms("🔥","PROFIT MILESTONE  +20%","Move SL up — locking in 10% minimum profit!",sl_20))
-    elif pnl>=35 and "p35" not in milestones:
-        active_trades[coin].setdefault("milestones_sent",[]).append("p35")
+        send_telegram(_ms("🔥",f"MILESTONE 2  •  +{m2:.1f}% reached",
+                          f"SL moved to lock in ~50% of current gain ({fmt_pnl(m2*0.5)} minimum).",sl_price))
+    elif pnl>=m3 and "p3" not in milestones:
+        sl_price=_sl_lock_price(m3,0.8)
+        active_trades[coin].setdefault("milestones_sent",[]).append("p3")
+        active_trades[coin]["sl"]=sl_price
         save_active_trades()
-        send_telegram(_ms("🚀","PROFIT MILESTONE  +35%","Excellent trade — locking in 25% minimum profit!",sl_35))
+        send_telegram(_ms("🚀",f"MILESTONE 3  •  +{m3:.1f}% reached",
+                          f"SL moved to lock in ~80% of current gain ({fmt_pnl(m3*0.8)} minimum). Final target +{target:.1f}%!",sl_price))
 
 def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition="bull"):
     global sent_coins,coin_cooldowns
@@ -1935,11 +2029,6 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     dir_arrow="🟢 LONG  ▲" if setup["direction"]=="BUY" else "🔴 SHORT ▼"
     grade_em="🏆" if "A+" in grade else "🍀" if " A" in grade else "🥈" if "B" in grade else "🥉"
     cond_icon="📈" if market_condition=="bull" else "📉" if market_condition=="bear" else "➡️"
-
-    if setup["direction"]=="BUY":
-        ms10=format_price(entry); ms20=format_price(entry+(tp-entry)*0.5); ms35=format_price(entry+(tp-entry)*0.75)
-    else:
-        ms10=format_price(entry); ms20=format_price(entry-(entry-tp)*0.5); ms35=format_price(entry-(entry-tp)*0.75)
 
     # ── Score bar ──
     filled=min(int(setup["setup_score"]/10),10)
@@ -2033,10 +2122,24 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     msg += f"  │  🏗️ MS   : {ms_bias_em} {struct_str}{bos_str}\n"
     msg += f"  └─────────────────────────────┘\n\n"
 
+    # Proportional milestone plan — scales with the ACTUAL profit target (not fixed 35%)
+    m1_pnl = profit_target*0.30; m2_pnl = profit_target*0.60; m3_pnl = profit_target*0.85
+    def _price_at_pnl(target_pnl):
+        move = entry * (target_pnl/100) / lev
+        return entry+move if setup["direction"]=="BUY" else entry-move
+    def _sl_lock_price(target_pnl, lock_ratio):
+        # SL locks in lock_ratio of the gain reached at target_pnl
+        gain_price = abs(_price_at_pnl(target_pnl) - entry)
+        locked = gain_price * lock_ratio
+        return entry+locked if setup["direction"]=="BUY" else entry-locked
+    ms1=format_price(_sl_lock_price(m1_pnl, 0.0))   # at 30% of target → SL to breakeven
+    ms2=format_price(_sl_lock_price(m2_pnl, 0.5))   # at 60% of target → lock half the gain so far
+    ms3=format_price(_sl_lock_price(m3_pnl, 0.8))   # at 85% of target → lock 80% of gain
     msg += f"  ┌── MILESTONE PLAN ───────────┐\n"
-    msg += f"  │  🎯 +10%  → SL to <code>{ms10}</code>\n"
-    msg += f"  │  🎯 +20%  → SL to <code>{ms20}</code>\n"
-    msg += f"  │  🚀 +35%  → SL to <code>{ms35}</code>\n"
+    msg += f"  │  🎯 +{m1_pnl:.1f}%  → SL to <code>{ms1}</code>  <i>(breakeven)</i>\n"
+    msg += f"  │  🔥 +{m2_pnl:.1f}%  → SL to <code>{ms2}</code>  <i>(lock 50%)</i>\n"
+    msg += f"  │  🚀 +{m3_pnl:.1f}%  → SL to <code>{ms3}</code>  <i>(lock 80%)</i>\n"
+    msg += f"  │  🏁 Final Target: +{profit_target:.1f}%\n"
     msg += f"  └─────────────────────────────┘\n\n"
 
     msg += f"  ⏳ ETA: ~{eta} min  •  ⏰ Exp: {expiry_str}\n"
@@ -2044,7 +2147,8 @@ def format_and_send(setup,coin,is_river=False,is_instant=False,market_condition=
     setup.update({"entry":entry,"sl":sl,"tp":tp,"timestamp":get_ist_datetime(),
                   "expires_at":expiry_time,"reversal_alerted":False,"breakeven_sent":False,
                   "partial_tp_taken":False,"milestones_sent":[],"tf_score":tf_score,
-                  "market_condition":market_condition,"eta_minutes":eta})
+                  "market_condition":market_condition,"eta_minutes":eta,
+                  "profit_target":profit_target})
     pending_signals[coin]=setup
     reply_markup={"inline_keyboard":[[
         {"text":"✅ Activate Trade","callback_data":f"ACTIVATE_{coin}"},
