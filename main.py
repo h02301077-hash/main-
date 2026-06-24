@@ -15,9 +15,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
-NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "f9cad228544447a5a8c283082747b803")      # CryptoPanic API key (optional)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
+NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
 BINANCE_KLINE_URL   = "https://data-api.binance.vision/api/v3/klines"
@@ -2392,114 +2392,101 @@ def poll_telegram():
     global last_update_id
     while True:
         try:
-            params={}
+            params={"timeout":10}
             if last_update_id is not None: params["offset"]=last_update_id+1
             res=requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-                             params=params,timeout=15)
+                             params=params,timeout=20)
             if res.status_code!=200: time.sleep(2); continue
-            for update in res.json().get("result",[]):
+            updates=res.json().get("result",[])
+            for update in updates:
                 last_update_id=update["update_id"]
-                if "callback_query" in update:
-                    cb=update["callback_query"]
-                    data=cb.get("data","")
-                    cbid=cb.get("id","")
-                    answer_callback(cbid,"⚔️ Processing...")
-                    logger.info(f"CALLBACK: data='{data}' pending_keys={list(pending_signals.keys())}")
-                    if data and "_" in data:
-                        parts=data.split("_",1)
-                        action=parts[0]
-                        coin=parts[1]
-                        logger.info(f"CALLBACK parsed: action={action} coin={coin} coin_in_pending={coin in pending_signals}")
+                try:
+                    # ── CALLBACK (button taps) ──────────────────────────
+                    if "callback_query" in update:
+                        cb=update["callback_query"]
+                        data=cb.get("data",""); cbid=cb.get("id","")
+                        answer_callback(cbid,"Processing...")
+                        logger.info(f"CALLBACK: '{data}' | pending={list(pending_signals.keys())}")
+                        if not data or "_" not in data: continue
+                        action,coin=data.split("_",1)
+                        logger.info(f"action={action} coin={coin} in_pending={coin in pending_signals}")
                         if action=="ACTIVATE":
                             if coin in pending_signals:
                                 try:
                                     sig=dict(pending_signals[coin])
-                                    # Fresh price
                                     lp=get_price(sig.get("symbol",coin+"USDT"))
                                     if lp and lp>0: sig["entry"]=lp
-                                    ep=sig.get("entry",0)
-                                    sl_p=sig.get("sl",0)
-                                    tp_p=sig.get("tp",0)
-                                    lev=sig.get("leverage",5)
-                                    dirn=sig.get("direction","BUY")
-                                    pat=sig.get("pattern","?")
-                                    # Reset flags
-                                    sig["breakeven_sent"]=False
-                                    sig["partial_tp_taken"]=False
-                                    sig["reversal_alerted"]=False
-                                    sig["milestones_sent"]=[]
-                                    sig["timestamp"]=get_ist_datetime()
-                                    sig["expires_at"]=None
-                                    # Profit target
-                                    sl_pct=abs(ep-sl_p)/ep*100 if ep>0 else 2
-                                    tp_pct=abs(tp_p-ep)/ep*100 if ep>0 else 5
-                                    profit_target=tp_pct*lev
-                                    sig["profit_target"]=profit_target
-                                    # Milestone prices — direct math, no nested def
-                                    m1_pnl=profit_target*0.30
-                                    m2_pnl=profit_target*0.60
-                                    m3_pnl=profit_target*0.85
-                                    move1=ep*(m1_pnl/100)/lev if lev>0 else 0
-                                    move2=ep*(m2_pnl/100)/lev if lev>0 else 0
-                                    move3=ep*(m3_pnl/100)/lev if lev>0 else 0
+                                    ep  =float(sig.get("entry",0) or 0)
+                                    sl_p=float(sig.get("sl",0) or 0)
+                                    tp_p=float(sig.get("tp",0) or 0)
+                                    lev =int(sig.get("leverage",5) or 5)
+                                    dirn=str(sig.get("direction","BUY"))
+                                    pat =str(sig.get("pattern","?"))
+                                    # Reset tracking
+                                    sig.update({
+                                        "breakeven_sent":False,"partial_tp_taken":False,
+                                        "reversal_alerted":False,"milestones_sent":[],
+                                        "timestamp":get_ist_datetime(),"expires_at":None
+                                    })
+                                    # Calc profit target
+                                    sl_pct =abs(ep-sl_p)/ep*100 if ep>0 else 2.0
+                                    tp_pct =abs(tp_p-ep)/ep*100 if ep>0 else 5.0
+                                    pt     =tp_pct*lev
+                                    sig["profit_target"]=pt
+                                    # Milestone SL prices
+                                    unit=ep/lev if lev>0 else ep*0.01
                                     if dirn=="BUY":
-                                        ms1=format_price(ep)                        # breakeven
-                                        ms2=format_price(ep+(move2*0.5))            # lock 50%
-                                        ms3=format_price(ep+(move3*0.8))            # lock 80%
+                                        ms1=ep
+                                        ms2=ep+unit*(pt*0.60/100)*0.5*lev
+                                        ms3=ep+unit*(pt*0.85/100)*0.8*lev
                                     else:
-                                        ms1=format_price(ep)
-                                        ms2=format_price(ep-(move2*0.5))
-                                        ms3=format_price(ep-(move3*0.8))
+                                        ms1=ep
+                                        ms2=ep-unit*(pt*0.60/100)*0.5*lev
+                                        ms3=ep-unit*(pt*0.85/100)*0.8*lev
                                     rr=round(tp_pct/sl_pct,1) if sl_pct>0 else 0
-                                    dir_em2="🌸 LONG ▲" if dirn=="BUY" else "🍂 SHORT ▼"
-                                    # Save trade
-                                    with trade_lock:
-                                        active_trades[coin]=sig
+                                    # Save WITHOUT trade_lock to avoid deadlock
+                                    active_trades[coin]=sig
                                     del pending_signals[coin]
                                     save_active_trades()
                                     save_pending_signals()
-                                    # Send confirmation
-                                    send_telegram(
-                                        f"⚔️ <b>BATTLE BEGINS — {coin}</b>\n"
-                                        f"{YT_DIV}\n\n"
-                                        f"  🪙 <b>{coin}</b>   {dir_em2}   刀 {lev}x\n"
-                                        f"  📜 {pat}\n\n"
-                                        f"  ▸ Entry  : <code>{format_price(ep)}</code>\n"
-                                        f"  ▸ Target : <code>{format_price(tp_p)}</code>  +{tp_pct:.2f}%\n"
-                                        f"  ▸ Guard  : <code>{format_price(sl_p)}</code>  -{sl_pct:.2f}%\n"
-                                        f"  ▸ RR     : 1:{rr}\n"
-                                        f"  ▸ Honour : +{profit_target:.1f}% max\n\n"
-                                        f"{YT_DIV}\n"
-                                        f"  📜 Milestone Plan\n\n"
-                                        f"  ⛩ +{m1_pnl:.1f}% → SL to <code>{ms1}</code>  (breakeven)\n"
-                                        f"  🔥 +{m2_pnl:.1f}% → SL to <code>{ms2}</code>  (lock 50%)\n"
-                                        f"  🗻 +{m3_pnl:.1f}% → SL to <code>{ms3}</code>  (lock 80%)\n"
-                                        f"  🏁 Final: +{profit_target:.1f}%\n\n"
-                                        f"  The battle has begun. Guard your position.\n"
-                                        f"  🕐 {get_ist_time()}"
-                                    )
-                                    logger.info(f"ACTIVATED: {coin}|{dirn}|Entry:{ep}|{lev}x")
+                                    # Plain message — no YT_DIV or HTML that can fail
+                                    dir_arrow="LONG" if dirn=="BUY" else "SHORT"
+                                    msg=(f"ACTIVATED: {coin} {dir_arrow} {lev}x\n\n"
+                                         f"Entry  : {format_price(ep)}\n"
+                                         f"Target : {format_price(tp_p)}  +{tp_pct:.2f}%\n"
+                                         f"Guard  : {format_price(sl_p)}  -{sl_pct:.2f}%\n"
+                                         f"RR     : 1:{rr}\n"
+                                         f"Max    : +{pt:.1f}%\n\n"
+                                         f"Milestones:\n"
+                                         f"+{pt*0.30:.1f}% SL to {format_price(ms1)} (breakeven)\n"
+                                         f"+{pt*0.60:.1f}% SL to {format_price(ms2)} (lock 50%)\n"
+                                         f"+{pt*0.85:.1f}% SL to {format_price(ms3)} (lock 80%)\n\n"
+                                         f"Pattern: {pat}\n"
+                                         f"{get_ist_time()}")
+                                    send_telegram(msg, parse_mode="")
+                                    logger.info(f"ACTIVATED: {coin}|{dirn}|{ep}|{lev}x")
                                 except Exception as e:
                                     logger.error(f"ACTIVATE error {coin}: {e}")
-                                    send_telegram(f"⚠️ <b>Activation error for {coin}</b>\n<code>{str(e)[:200]}</code>")
+                                    send_telegram(f"Activation error {coin}: {str(e)[:150]}", parse_mode="")
                             else:
+                                logger.warning(f"ACTIVATE: {coin} not in pending. pending={list(pending_signals.keys())}")
                                 send_telegram(
-                                    f"⏰ <b>Signal Expired — {coin}</b>\n\n"
-                                    f"  The scroll for <b>{coin}</b> has faded.\n"
-                                    f"  Await the next signal.\n\n"
-                                    f"  Known scrolls: {', '.join(pending_signals.keys()) or 'none'}\n"
-                                    f"  🕐 {get_ist_time()}"
+                                    f"Signal expired: {coin}\n"
+                                    f"Pending signals: {', '.join(pending_signals.keys()) or 'none'}\n"
+                                    f"{get_ist_time()}",
+                                    parse_mode=""
                                 )
-                                logger.warning(f"ACTIVATE failed: {coin} not in pending={list(pending_signals.keys())}")
                         elif action=="IGNORE":
-                            if coin in pending_signals: del pending_signals[coin]
-                            save_pending_signals()
-                            send_telegram(f"❌ <b>{BOT_HEADER}</b>\n{coin} signal ignored.")
-                elif "message" in update:
-                    txt=update["message"].get("text","").strip().lower()
-                    txt_slash=txt  # for slash commands (already lowercase)
-                    txt_clean = txt.replace('\ufe0f','').replace('\ufe0e','').strip()
-                    if   txt_slash=="/trades":   safe_send(get_active_trades_text,"📊 Trades")
+                            if coin in pending_signals:
+                                del pending_signals[coin]
+                                save_pending_signals()
+                            send_telegram(f"Ignored: {coin}", parse_mode="")
+                    # ── MESSAGE (text commands & button taps) ──────────
+                    elif "message" in update:
+                        txt=update["message"].get("text","").strip().lower()
+                        txt_slash=txt
+                        txt_clean=txt.replace('\ufe0f','').replace('\ufe0e','').strip()
+                        if   txt_slash=="/trades":   safe_send(get_active_trades_text,"📊 Trades")
                     elif txt_slash=="/pending":
                         if pending_signals:
                             msg=f"{_H('PENDING SIGNALS','⏳')}\n\n"
@@ -2726,9 +2713,11 @@ def poll_telegram():
                             f"  ⏳ Scouts: {len(pending_signals)}\n\n"
                             f"  🕐 {get_ist_time()}"
                         )
+                except Exception as upd_e:
+                    logger.error(f"Update processing error: {upd_e}", exc_info=True)
         except requests.RequestException as e: logger.error(f"Poll network: {e}")
         except Exception as e:                 logger.error(f"Poll error: {e}",exc_info=True)
-        time.sleep(2)
+        time.sleep(1)
 
 def send_hourly_report():
     r=f"<b>{BOT_HEADER} Hourly Report</b>\n{get_ist_time()}\n{S()}\n\n"
