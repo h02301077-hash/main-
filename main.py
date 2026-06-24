@@ -15,9 +15,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
-NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "f9cad228544447a5a8c283082747b803")      # CryptoPanic API key (optional)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
+NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
 BINANCE_KLINE_URL   = "https://data-api.binance.vision/api/v3/klines"
@@ -214,10 +214,18 @@ def save_pending_signals():
         s={}
         for coin,sig in list(pending_signals.items()):
             d=dict(sig)
-            if isinstance(d.get("timestamp"),datetime): d["timestamp"]=d["timestamp"].isoformat()
-            if isinstance(d.get("expires_at"),datetime): d["expires_at"]=d["expires_at"].isoformat()
+            # Store datetimes as timezone-aware isoformat strings
+            if isinstance(d.get("timestamp"),datetime):
+                ts=d["timestamp"]
+                if ts.tzinfo is None: ts=IST.localize(ts)
+                d["timestamp"]=ts.isoformat()
+            if isinstance(d.get("expires_at"),datetime):
+                ex=d["expires_at"]
+                if ex.tzinfo is None: ex=IST.localize(ex)
+                d["expires_at"]=ex.isoformat()
             s[coin]=d
         with open("pending_signals.json","w") as f: json.dump(s,f)
+        logger.info(f"Saved {len(s)} pending signals.")
     except Exception as e: logger.error(f"save_pending: {e}")
 
 def load_pending_signals():
@@ -226,18 +234,32 @@ def load_pending_signals():
         if not os.path.exists("pending_signals.json"): return
         with open("pending_signals.json") as f: data=json.load(f)
         now=get_ist_datetime()
+        loaded=0
         for coin,sig in data.items():
+            # Handle expires_at — skip only if CLEARLY expired
             if sig.get("expires_at"):
                 try:
                     exp=datetime.fromisoformat(sig["expires_at"])
-                    if now>exp: continue
+                    # Make timezone-aware if naive
+                    if exp.tzinfo is None: exp=IST.localize(exp)
+                    if now>exp:
+                        logger.info(f"Pending {coin} expired — skipping")
+                        continue
                     sig["expires_at"]=exp
-                except Exception: continue
+                except Exception as e:
+                    # On any datetime error, keep the signal — don't lose it
+                    logger.warning(f"expires_at parse error for {coin}: {e} — keeping signal")
+                    sig["expires_at"]=None
             if sig.get("timestamp"):
-                try: sig["timestamp"]=datetime.fromisoformat(sig["timestamp"])
-                except Exception: pass
+                try:
+                    ts=datetime.fromisoformat(sig["timestamp"])
+                    if ts.tzinfo is None: ts=IST.localize(ts)
+                    sig["timestamp"]=ts
+                except Exception:
+                    sig["timestamp"]=get_ist_datetime()
             pending_signals[coin]=sig
-        logger.info(f"Loaded {len(pending_signals)} pending signals.")
+            loaded+=1
+        logger.info(f"Loaded {loaded}/{len(data)} pending signals.")
     except Exception as e: logger.error(f"load_pending: {e}")
 
 def save_circuit_breaker():
@@ -2381,11 +2403,13 @@ def poll_telegram():
                     cb=update["callback_query"]
                     data=cb.get("data","")
                     cbid=cb.get("id","")
-                    answer_callback(cbid,"Processing...")
-                    logger.info(f"Callback received: data={data} pending={list(pending_signals.keys())}")
+                    answer_callback(cbid,"⚔️ Processing...")
+                    logger.info(f"CALLBACK: data='{data}' pending_keys={list(pending_signals.keys())}")
                     if data and "_" in data:
-                        action=data.split("_",1)[0]
-                        coin=data.split("_",1)[1]
+                        parts=data.split("_",1)
+                        action=parts[0]
+                        coin=parts[1]
+                        logger.info(f"CALLBACK parsed: action={action} coin={coin} coin_in_pending={coin in pending_signals}")
                         if action=="ACTIVATE":
                             if coin in pending_signals:
                                 try:
