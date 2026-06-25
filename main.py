@@ -15,9 +15,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
-NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "f9cad228544447a5a8c283082747b803")      # CryptoPanic API key (optional)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
+NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
 BINANCE_KLINE_URL   = "https://data-api.binance.vision/api/v3/klines"
@@ -210,11 +210,12 @@ def load_alerts():
     except Exception as e: logger.error(f"load_alerts: {e}")
 
 def save_pending_signals():
+    """Save pending signals to JSON. Note: Railway filesystem is ephemeral —
+    signals are also kept in memory and re-announced on /pending command."""
     try:
         s={}
         for coin,sig in list(pending_signals.items()):
             d=dict(sig)
-            # Store datetimes as timezone-aware isoformat strings
             if isinstance(d.get("timestamp"),datetime):
                 ts=d["timestamp"]
                 if ts.tzinfo is None: ts=IST.localize(ts)
@@ -223,32 +224,43 @@ def save_pending_signals():
                 ex=d["expires_at"]
                 if ex.tzinfo is None: ex=IST.localize(ex)
                 d["expires_at"]=ex.isoformat()
+            # Remove non-serialisable objects
+            for k in list(d.keys()):
+                if not isinstance(d[k],(str,int,float,bool,list,dict,type(None))):
+                    d[k]=str(d[k])
             s[coin]=d
-        with open("pending_signals.json","w") as f: json.dump(s,f)
-        logger.info(f"Saved {len(s)} pending signals.")
-    except Exception as e: logger.error(f"save_pending: {e}")
+        with open("pending_signals.json","w") as f:
+            json.dump(s,f,indent=2)
+        logger.info(f"Saved {len(s)} pending signals to disk.")
+    except Exception as e:
+        logger.error(f"save_pending: {e}")
 
 def load_pending_signals():
+    """Load pending signals from disk. On Railway, file may not exist after
+    redeploy — that is expected. Signals in memory survive within a session."""
     global pending_signals
     try:
-        if not os.path.exists("pending_signals.json"): return
-        with open("pending_signals.json") as f: data=json.load(f)
-        now=get_ist_datetime()
-        loaded=0
+        if not os.path.exists("pending_signals.json"):
+            logger.info("No pending_signals.json found (normal after Railway redeploy)")
+            return
+        with open("pending_signals.json") as f:
+            raw=f.read().strip()
+        if not raw:
+            logger.info("pending_signals.json is empty")
+            return
+        data=json.loads(raw)
+        now=get_ist_datetime(); loaded=0
         for coin,sig in data.items():
-            # Handle expires_at — skip only if CLEARLY expired
             if sig.get("expires_at"):
                 try:
                     exp=datetime.fromisoformat(sig["expires_at"])
-                    # Make timezone-aware if naive
                     if exp.tzinfo is None: exp=IST.localize(exp)
                     if now>exp:
                         logger.info(f"Pending {coin} expired — skipping")
                         continue
                     sig["expires_at"]=exp
                 except Exception as e:
-                    # On any datetime error, keep the signal — don't lose it
-                    logger.warning(f"expires_at parse error for {coin}: {e} — keeping signal")
+                    logger.warning(f"expires_at error {coin}: {e} — keeping")
                     sig["expires_at"]=None
             if sig.get("timestamp"):
                 try:
@@ -260,7 +272,30 @@ def load_pending_signals():
             pending_signals[coin]=sig
             loaded+=1
         logger.info(f"Loaded {loaded}/{len(data)} pending signals.")
-    except Exception as e: logger.error(f"load_pending: {e}")
+        # Re-send activate buttons for any loaded signals so user can tap them
+        if loaded>0:
+            for coin,sig in list(pending_signals.items()):
+                try:
+                    exp=sig.get("expires_at")
+                    exp_str=exp.strftime("%I:%M %p IST") if isinstance(exp,datetime) else "N/A"
+                    dirn=sig.get("direction","BUY")
+                    entry=sig.get("entry",sig.get("scan_price",0))
+                    tp=sig.get("tp",0); sl=sig.get("sl",0)
+                    reply_markup={"inline_keyboard":[[
+                        {"text":"✅ Activate Trade","callback_data":f"ACTIVATE_{coin}"},
+                        {"text":"❌ Ignore",        "callback_data":f"IGNORE_{coin}"}
+                    ]]}
+                    send_telegram(
+                        f"🔄 SIGNAL RESTORED: {coin} {dirn}\n"
+                        f"Entry:{format_price(entry)} TP:{format_price(tp)} SL:{format_price(sl)}\n"
+                        f"Expires:{exp_str}",
+                        parse_mode="",
+                        reply_markup=reply_markup
+                    )
+                except Exception as e:
+                    logger.warning(f"Re-announce {coin}: {e}")
+    except Exception as e:
+        logger.error(f"load_pending: {e}")
 
 def save_circuit_breaker():
     try:
