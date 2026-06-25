@@ -15,9 +15,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
-NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "f9cad228544447a5a8c283082747b803")      # CryptoPanic API key (optional)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
+NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
 BINANCE_KLINE_URL   = "https://data-api.binance.vision/api/v3/klines"
@@ -304,18 +304,16 @@ def get_ist_time():     return datetime.now(IST).strftime("%I:%M:%S %p IST")
 def get_ist_datetime(): return datetime.now(IST)
 
 def send_telegram(text, parse_mode="HTML", reply_markup=None, disable_web_page_preview=True):
-    payload={"chat_id":CHAT_ID,"text":text,"parse_mode":parse_mode,
-             "disable_web_page_preview":disable_web_page_preview}
+    payload={"chat_id":CHAT_ID,"disable_web_page_preview":disable_web_page_preview,"text":text}
+    if parse_mode: payload["parse_mode"]=parse_mode   # omit entirely if empty
     if reply_markup: payload["reply_markup"]=reply_markup
     try:
         res=requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                           json=payload,timeout=15)
         if res.status_code!=200:
             logger.warning(f"Telegram [{res.status_code}]: {res.text[:200]}")
-            # Retry without HTML parse mode if parse error
             if "parse" in res.text.lower() or "can't parse" in res.text.lower():
-                payload2={"chat_id":CHAT_ID,"text":text,
-                          "disable_web_page_preview":True}
+                payload2={"chat_id":CHAT_ID,"text":text,"disable_web_page_preview":True}
                 if reply_markup: payload2["reply_markup"]=reply_markup
                 res2=requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                                    json=payload2,timeout=15)
