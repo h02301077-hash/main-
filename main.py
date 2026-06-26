@@ -15,9 +15,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
-NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "f9cad228544447a5a8c283082747b803")      # CryptoPanic API key (optional)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
+NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
 BINANCE_KLINE_URL   = "https://data-api.binance.vision/api/v3/klines"
@@ -110,27 +110,19 @@ BOT_VERSION = "v32G"
 BOT_NAME    = "TRADING SIGNAL MASTER"
 BOT_HEADER  = f"⚔️ {BOT_NAME} {BOT_VERSION}"
 
-# ── Ghost of Yotei Theme ─────────────────────────────────
-YT_TOP    = "刀 ━━━━━━━━━━━━━━━━━━━━━━━━━━━ 刀"
-YT_DIV    = "　 ─────────────────────────────"
-YT_BOT    = "⛩ ━━━━━━━━━━━━━━━━━━━━━━━━━━━ ⛩"
-YT_WIN    = "🌸"   # sakura — victory
-YT_LOSS   = "🍂"   # fallen leaf — defeat
-YT_SCROLL = "📜"
-YT_FLAME  = "🔥"
-YT_SNOW   = "❄️"
-YT_MOON   = "🌕"
-YT_MTN    = "🗻"
-YT_SWORD  = "⚔️"
+# ── Ghost of Yotei Theme ─────────────────────────────
+YT_TOP = "刀 ━━━━━━━━━━━━━━━━━━━━━━━━━━━ 刀"
+YT_BOT = "⛩ ━━━━━━━━━━━━━━━━━━━━━━━━━━━ ⛩"
+YT_DIV = "─────────────────────────────"
+YT_WIN = "🌸"; YT_LOSS = "🍂"
 
-def _YH(title, kanji=""):
-    k = f"{kanji}  " if kanji else ""
-    return f"{YT_TOP}\n   {k}<b>{title}</b>\n{YT_BOT}"
+def _YH(title, icon=""):
+    prefix = f"{icon}  " if icon else ""
+    return YT_TOP+"\n   "+prefix+"<b>"+title+"</b>\n"+YT_BOT
 
 def S(c="━",n=30): return c*n
 def fmt_pnl(v):
-    if v >= 0: return f"{YT_WIN} <b>+{v:.2f}%</b>"
-    return f"{YT_LOSS} <b>{v:.2f}%</b>"
+    return f"{YT_WIN} <b>+{v:.2f}%</b>" if v>=0 else f"{YT_LOSS} <b>{v:.2f}%</b>"
 
 def save_active_trades():
     with trade_lock:
@@ -210,92 +202,35 @@ def load_alerts():
     except Exception as e: logger.error(f"load_alerts: {e}")
 
 def save_pending_signals():
-    """Save pending signals to JSON. Note: Railway filesystem is ephemeral —
-    signals are also kept in memory and re-announced on /pending command."""
     try:
         s={}
         for coin,sig in list(pending_signals.items()):
             d=dict(sig)
-            if isinstance(d.get("timestamp"),datetime):
-                ts=d["timestamp"]
-                if ts.tzinfo is None: ts=IST.localize(ts)
-                d["timestamp"]=ts.isoformat()
-            if isinstance(d.get("expires_at"),datetime):
-                ex=d["expires_at"]
-                if ex.tzinfo is None: ex=IST.localize(ex)
-                d["expires_at"]=ex.isoformat()
-            # Remove non-serialisable objects
-            for k in list(d.keys()):
-                if not isinstance(d[k],(str,int,float,bool,list,dict,type(None))):
-                    d[k]=str(d[k])
+            if isinstance(d.get("timestamp"),datetime): d["timestamp"]=d["timestamp"].isoformat()
+            if isinstance(d.get("expires_at"),datetime): d["expires_at"]=d["expires_at"].isoformat()
             s[coin]=d
-        with open("pending_signals.json","w") as f:
-            json.dump(s,f,indent=2)
-        logger.info(f"Saved {len(s)} pending signals to disk.")
-    except Exception as e:
-        logger.error(f"save_pending: {e}")
+        with open("pending_signals.json","w") as f: json.dump(s,f)
+    except Exception as e: logger.error(f"save_pending: {e}")
 
 def load_pending_signals():
-    """Load pending signals from disk. On Railway, file may not exist after
-    redeploy — that is expected. Signals in memory survive within a session."""
     global pending_signals
     try:
-        if not os.path.exists("pending_signals.json"):
-            logger.info("No pending_signals.json found (normal after Railway redeploy)")
-            return
-        with open("pending_signals.json") as f:
-            raw=f.read().strip()
-        if not raw:
-            logger.info("pending_signals.json is empty")
-            return
-        data=json.loads(raw)
-        now=get_ist_datetime(); loaded=0
+        if not os.path.exists("pending_signals.json"): return
+        with open("pending_signals.json") as f: data=json.load(f)
+        now=get_ist_datetime()
         for coin,sig in data.items():
             if sig.get("expires_at"):
                 try:
                     exp=datetime.fromisoformat(sig["expires_at"])
-                    if exp.tzinfo is None: exp=IST.localize(exp)
-                    if now>exp:
-                        logger.info(f"Pending {coin} expired — skipping")
-                        continue
+                    if now>exp: continue
                     sig["expires_at"]=exp
-                except Exception as e:
-                    logger.warning(f"expires_at error {coin}: {e} — keeping")
-                    sig["expires_at"]=None
+                except Exception: continue
             if sig.get("timestamp"):
-                try:
-                    ts=datetime.fromisoformat(sig["timestamp"])
-                    if ts.tzinfo is None: ts=IST.localize(ts)
-                    sig["timestamp"]=ts
-                except Exception:
-                    sig["timestamp"]=get_ist_datetime()
+                try: sig["timestamp"]=datetime.fromisoformat(sig["timestamp"])
+                except Exception: pass
             pending_signals[coin]=sig
-            loaded+=1
-        logger.info(f"Loaded {loaded}/{len(data)} pending signals.")
-        # Re-send activate buttons for any loaded signals so user can tap them
-        if loaded>0:
-            for coin,sig in list(pending_signals.items()):
-                try:
-                    exp=sig.get("expires_at")
-                    exp_str=exp.strftime("%I:%M %p IST") if isinstance(exp,datetime) else "N/A"
-                    dirn=sig.get("direction","BUY")
-                    entry=sig.get("entry",sig.get("scan_price",0))
-                    tp=sig.get("tp",0); sl=sig.get("sl",0)
-                    reply_markup={"inline_keyboard":[[
-                        {"text":"✅ Activate Trade","callback_data":f"ACTIVATE_{coin}"},
-                        {"text":"❌ Ignore",        "callback_data":f"IGNORE_{coin}"}
-                    ]]}
-                    send_telegram(
-                        f"🔄 SIGNAL RESTORED: {coin} {dirn}\n"
-                        f"Entry:{format_price(entry)} TP:{format_price(tp)} SL:{format_price(sl)}\n"
-                        f"Expires:{exp_str}",
-                        parse_mode="",
-                        reply_markup=reply_markup
-                    )
-                except Exception as e:
-                    logger.warning(f"Re-announce {coin}: {e}")
-    except Exception as e:
-        logger.error(f"load_pending: {e}")
+        logger.info(f"Loaded {len(pending_signals)} pending signals.")
+    except Exception as e: logger.error(f"load_pending: {e}")
 
 def save_circuit_breaker():
     try:
@@ -339,16 +274,18 @@ def get_ist_time():     return datetime.now(IST).strftime("%I:%M:%S %p IST")
 def get_ist_datetime(): return datetime.now(IST)
 
 def send_telegram(text, parse_mode="HTML", reply_markup=None, disable_web_page_preview=True):
-    payload={"chat_id":CHAT_ID,"disable_web_page_preview":disable_web_page_preview,"text":text}
-    if parse_mode: payload["parse_mode"]=parse_mode   # omit entirely if empty
+    payload={"chat_id":CHAT_ID,"text":text,"parse_mode":parse_mode,
+             "disable_web_page_preview":disable_web_page_preview}
     if reply_markup: payload["reply_markup"]=reply_markup
     try:
         res=requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                           json=payload,timeout=15)
         if res.status_code!=200:
             logger.warning(f"Telegram [{res.status_code}]: {res.text[:200]}")
+            # Retry without HTML parse mode if parse error
             if "parse" in res.text.lower() or "can't parse" in res.text.lower():
-                payload2={"chat_id":CHAT_ID,"text":text,"disable_web_page_preview":True}
+                payload2={"chat_id":CHAT_ID,"text":text,
+                          "disable_web_page_preview":True}
                 if reply_markup: payload2["reply_markup"]=reply_markup
                 res2=requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                                    json=payload2,timeout=15)
@@ -1326,16 +1263,15 @@ def run_backtest(symbol):
     except Exception as e: return f"Backtest failed: {e}"
 
 def _H(title, emoji=""):
-    """Yotei-themed section header — replaces old box-drawing header."""
     icon = f"{emoji}  " if emoji else ""
-    return f"{YT_TOP}\n   {icon}<b>{title}</b>\n{YT_BOT}"
+    return YT_TOP+"\n   "+icon+"<b>"+title+"</b>\n"+YT_BOT
 
 def get_active_trades_text():
     if not active_trades:
-        return (_YH("⚔️  OPEN BATTLES")+
-                f"\n\n  {YT_MOON}  The battlefield is quiet.\n\n"
-                f"  🛡  Guard    : {'🔴 SEALED' if check_circuit_breaker() else '🟢 OPEN'}\n"
-                f"  ⏳ Awaiting : {len(pending_signals)} scouts\n"
+        return (f"{_H('ACTIVE TRADES','📊')}\n\n"
+                f"  ⚪  No active trades right now.\n\n"
+                f"  🛡️ CB      : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
+                f"  ⏳ Pending : {len(pending_signals)}\n"
                 f"  🕐 {get_ist_time()}")
     now=get_ist_datetime(); lines=[]; total_pnl=0.0
     for coin,t in active_trades.items():
@@ -1345,7 +1281,7 @@ def get_active_trades_text():
         rr=round(tp_pct/sl_pct,1) if sl_pct>0 else 0
         dirn=t.get("direction","?"); lev=t.get("leverage",1)
         pat=t.get("pattern","?").split(" + ")[0]
-        dir_em="🌸 LONG  ▲" if dirn=="BUY" else "🍂 SHORT ▼"
+        dir_em="🟢 LONG  ▲" if dirn=="BUY" else "🔴 SHORT ▼"
         dur=""
         if t.get("timestamp"):
             try:
@@ -1355,28 +1291,28 @@ def get_active_trades_text():
         if price:
             pnl=((price-t["entry"])/t["entry"])*100*lev if dirn=="BUY" else ((t["entry"]-price)/t["entry"])*100*lev
             total_pnl+=pnl; pnl_txt=fmt_pnl(pnl)
-        else: pnl_txt="⏳ awaiting"
+        else: pnl_txt="⏳"
         ms=t.get("milestones_sent",[])
-        badge=("  🗻 M3 HONOUR LOCKED" if "p3" in ms else "  🔥 M2 SECURED" if "p2" in ms else "  ⛩ M1 SAFE" if "p1" in ms else "")
-        target=t.get("profit_target",abs(t["tp"]-t["entry"])/t["entry"]*100*lev)
-        partial="  🌸 Partial taken" if t.get("partial_tp_taken") else ""
+        badge=("  🚀 M3 LOCKED" if "p3" in ms else "  🔥 M2 LOCKED" if "p2" in ms else "  ✅ M1 BREAKEVEN" if "p1" in ms else "")
+        target=t.get("profit_target", abs(t['tp']-t['entry'])/t['entry']*100*lev)
+        partial="  💰 Partial TP" if t.get("partial_tp_taken") else ""
         lines.append(
-            f"{YT_DIV}\n"
-            f"  🪙 <b>{coin}</b>   {dir_em}   刀 {lev}x\n"
-            f"  ▸ Entry  : <code>{format_price(t['entry'])}</code>\n"
-            f"  ▸ Target : <code>{format_price(t['tp'])}</code>  +{tp_pct:.2f}%\n"
-            f"  ▸ Guard  : <code>{format_price(t['sl'])}</code>  -{sl_pct:.2f}%\n"
-            f"  ▸ RR 1:{rr}   Time: {dur or 'just now'}\n"
-            f"  ▸ Honour : {pnl_txt}  〔+{target:.1f}%〕{partial}\n"
-            f"  {YT_SCROLL} {pat}{badge}"
+            f"  ┌─────────────────────────────┐\n"
+            f"  │  🪙 <b>{coin}</b>  {dir_em}  ✦ {lev}x\n"
+            f"  │  💰 Entry  : <code>{format_price(t['entry'])}</code>\n"
+            f"  │  🎯 Target : <code>{format_price(t['tp'])}</code>  ↑{tp_pct:.2f}%\n"
+            f"  │  🛑 Stop   : <code>{format_price(t['sl'])}</code>  ↓{sl_pct:.2f}%\n"
+            f"  │  ⚖️  RR 1:{rr}   ⏱️ {dur or 'just now'}\n"
+            f"  │  📈 PnL    : {pnl_txt}  🎯Target:+{target:.1f}%{partial}\n"
+            f"  │  📌 {pat}{badge}\n"
+            f"  └─────────────────────────────┘"
         )
-    return (_YH(f"⚔️  OPEN BATTLES  {len(active_trades)}/{MAX_ACTIVE_TRADES}")+
-            "\n\n"+
-            "\n\n".join(lines)+
-            f"\n\n{YT_DIV}\n"
-            f"  🗻 Realm Honour : {fmt_pnl(total_pnl)}\n"
-            f"  🛡  CB          : {'🔴 SEALED' if check_circuit_breaker() else '🟢 OPEN'}\n"
-            f"  ⏳ Pending      : {len(pending_signals)}\n"
+    return (f"{_H(f'ACTIVE TRADES  {len(active_trades)}/{MAX_ACTIVE_TRADES}','📊')}\n\n"
+            + "\n\n".join(lines) +
+            f"\n\n  ══════════════════════════════\n"
+            f"  💼 Portfolio PnL : {fmt_pnl(total_pnl)}\n"
+            f"  🛡️ CB      : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
+            f"  ⏳ Pending : {len(pending_signals)}\n"
             f"  🕐 {get_ist_time()}")
 
 def get_pattern_stats_text():
@@ -1385,26 +1321,27 @@ def get_pattern_stats_text():
     ts=sum(s["signals"] for s in pattern_stats.values())
     owr=(tw/ts*100) if ts>0 else 0
     tp_=sum(s["total_pnl"] for s in pattern_stats.values())
-    text=(_YH("📜  SCROLL OF PATTERNS")+"\n\n"
-          f"  ▸ Battles  : {ts}   {YT_WIN}{tw}  {YT_LOSS}{tl}\n"
-          f"  ▸ Victory  : <b>{owr:.1f}%</b>\n"
-          f"  ▸ Honour   : {fmt_pnl(tp_)}\n\n"
-          f"{YT_DIV}\n\n")
+    text=(f"{_H('PATTERN PERFORMANCE','📈')}\n\n"
+          f"  🔢 Signals  : {ts}   ✅ {tw}W  ❌ {tl}L\n"
+          f"  🎯 Win Rate : <b>{owr:.1f}%</b>\n"
+          f"  💰 Total PnL: {fmt_pnl(tp_)}\n\n"
+          f"  ══════════════════════════════\n\n")
     for pat,s in sorted(pattern_stats.items(),key=lambda x:x[1]["signals"],reverse=True):
         if s["signals"]>0:
             wr=(s["wins"]/s["signals"])*100
-            filled=int(wr/10); bar="◈"*filled+"·"*(10-filled)
-            flag="🍂" if wr<40 else "🌙" if wr<60 else "🌸"
-            susp="  🔒 SEALED" if is_pattern_suspended(pat) else ""
-            w=s.get("weight",1.0); wt="↑" if w>1.05 else "↓" if w<0.95 else "—"
+            filled=int(wr/10); bar="█"*filled+"░"*(10-filled)
+            flag="🔴" if wr<40 else "🟡" if wr<60 else "🟢"
+            susp="  🔒 SUSP" if is_pattern_suspended(pat) else ""
+            w=s.get("weight",1.0); wt="📈" if w>1.05 else "📉" if w<0.95 else "━"
             text+=(f"  {flag} <b>{pat}</b>{susp}\n"
-                   f"  [{bar}] {wr:.1f}%  ·  {s['signals']} battles  ·  {wt}{w:.1f}  ·  {fmt_pnl(s['total_pnl'])}\n\n")
+                   f"  [{bar}] {wr:.1f}%  •  {s['signals']} signals  •  {wt}{w:.1f}x\n"
+                   f"  {s['wins']}W / {s['losses']}L  •  {fmt_pnl(s['total_pnl'])}\n\n")
     text+=f"  🕐 {get_ist_time()}"
     return text
 
 def get_10day_summary_text():
     today=datetime.now(IST).date()
-    text=_YH("🗻  TEN DAYS OF WAR")+"\n\n"
+    text=f"{_H('10-DAY PERFORMANCE','📅')}\n\n"
     ow=ol=0; op=0.0; best_pnl=worst_pnl=None; best_ds=worst_ds=""
     for days_ago in range(9,-1,-1):
         day=today-timedelta(days=days_ago)
@@ -1413,45 +1350,45 @@ def get_10day_summary_text():
         total=w+l; pnl=sum(t["pnl"] for t in dt)
         ow+=w; ol+=l; op+=pnl; ds=day.strftime("%d %b")
         if total==0:
-            text+=f"  🌙 <b>{ds}</b>  ·  No battles\n"
+            text+=f"  ⚪ <b>{ds}</b>  ──────────  No trades\n"
         else:
-            em=YT_WIN if w>l else YT_LOSS if l>w else "·"
-            bar="◈"*w+"·"*l
+            em="✅" if w>l else "❌" if l>w else "➖"
+            bar="█"*w+"░"*l
             text+=f"  {em} <b>{ds}</b>  [{bar[:8]}]  {w}W/{l}L  {fmt_pnl(pnl)}\n"
             if best_pnl is None or pnl>best_pnl: best_pnl=pnl; best_ds=ds
             if worst_pnl is None or pnl<worst_pnl: worst_pnl=pnl; worst_ds=ds
     ot=ow+ol; owr=(ow/ot*100) if ot>0 else 0
-    text+=(f"\n{YT_DIV}\n"
-           f"  {YT_WIN} Victories : {ow}   {YT_LOSS} Defeats : {ol}\n"
-           f"  🗻 Honour Rate : <b>{owr:.1f}%</b>\n"
-           f"  ⛩ Tribute     : {fmt_pnl(op)}   Per day: {fmt_pnl(op/10)}\n")
-    if best_ds:  text+=f"  🌸 Greatest   : {best_ds}  ({fmt_pnl(best_pnl)})\n"
-    if worst_ds: text+=f"  🍂 Hardest    : {worst_ds}  ({fmt_pnl(worst_pnl)})\n"
+    text+=(f"\n  ══════════════════════════════\n"
+           f"  ✅ Wins     : {ow}   ❌ Losses  : {ol}\n"
+           f"  🎯 Win Rate : <b>{owr:.1f}%</b>\n"
+           f"  💰 PnL      : {fmt_pnl(op)}   📊 Avg/Day: {fmt_pnl(op/10)}\n")
+    if best_ds:  text+=f"  🏆 Best Day : {best_ds}  ({fmt_pnl(best_pnl)})\n"
+    if worst_ds: text+=f"  📉 Worst    : {worst_ds}  ({fmt_pnl(worst_pnl)})\n"
     text+=f"  🕐 {get_ist_time()}"
     return text
 
 def get_streak_text():
     if not trade_journal:
-        return _YH("🔥  BATTLE STREAK")+"\n\n  🌙 No battles recorded yet."
+        return f"{_H('STREAK TRACKER','🔥')}\n\n  ⚪ No trades recorded yet."
     st=trade_journal[-1]["result"]; sc=0
     for t in reversed(trade_journal):
         if t["result"]==st: sc+=1
         else: break
     total=len(trade_journal); wins=sum(1 for t in trade_journal if t["result"]=="WIN")
     owr=(wins/total*100) if total>0 else 0
-    em=YT_WIN if st=="WIN" else YT_LOSS
+    em="🔥" if st=="WIN" else "❄️"
     bar=(em*min(sc,8)).ljust(8)
-    label="VICTORIOUS ⚔️" if st=="WIN" else "TESTED 🍂"
-    return (_YH("🔥  BATTLE STREAK")+"\n\n"
+    label="WINNING 🏆" if st=="WIN" else "LOSING ⚠️"
+    return (f"{_H('STREAK TRACKER','🔥')}\n\n"
             f"  {bar}\n\n"
             f"  Current  : <b>{sc} {label}</b>\n"
-            f"  Battles  : {total}\n"
-            f"  Honour   : <b>{owr:.1f}%</b>\n\n"
+            f"  Trades   : {total}\n"
+            f"  Win Rate : <b>{owr:.1f}%</b>\n\n"
             f"  🕐 {get_ist_time()}")
 
 def get_best_text():
     if not trade_journal:
-        return _YH("🏆  LEGENDS OF THE REALM")+"\n\n  🌙 No tales recorded yet."
+        return f"{_H('BEST PERFORMERS','🏆')}\n\n  ⚪ No trade data yet."
     cs={}; ps2={}
     for t in trade_journal:
         c=t["coin"]
@@ -1460,106 +1397,108 @@ def get_best_text():
         p=t["pattern"]
         if p not in ps2: ps2[p]={"W":0,"L":0}
         ps2[p]["W" if t["result"]=="WIN" else "L"]+=1
-    medals=["⛩","🗻","🌸","◈","·"]
+    medals=["🥇","🥈","🥉","🏅","🏅"]
     sc=sorted(cs.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:5]
     sp=sorted(ps2.items(),key=lambda x:(x[1]["W"]/(x[1]["W"]+x[1]["L"])) if (x[1]["W"]+x[1]["L"])>0 else 0,reverse=True)[:5]
-    text=(_YH("🏆  LEGENDS OF THE REALM")+"\n\n"
-          f"  ⚔️ <b>Warriors by Honour Rate</b>\n\n")
+    text=(f"{_H('BEST PERFORMERS','🏆')}\n\n"
+          f"  💰 <b>Top Coins by Win Rate</b>\n\n")
     for i,(c,s) in enumerate(sc):
         tot=s["W"]+s["L"]; wr=(s["W"]/tot*100) if tot>0 else 0
-        text+=f"  {medals[i]} <b>{c}</b>  {wr:.1f}%  ({tot} battles)  {fmt_pnl(s['pnl'])}\n"
-    text+=f"\n{YT_DIV}\n\n  📜 <b>Techniques by Honour Rate</b>\n\n"
+        text+=f"  {medals[i]} <b>{c}</b>  {wr:.1f}% WR  ({tot} trades)  {fmt_pnl(s['pnl'])}\n"
+    text+=f"\n  ══════════════════════════════\n\n  🌀 <b>Top Patterns by Win Rate</b>\n\n"
     for i,(p,s) in enumerate(sp):
         tot=s["W"]+s["L"]; wr=(s["W"]/tot*100) if tot>0 else 0
-        text+=f"  {medals[i]} <b>{p}</b>  {wr:.1f}%  ({tot} battles)\n"
+        text+=f"  {medals[i]} <b>{p}</b>  {wr:.1f}%  ({tot} trades)\n"
     text+=f"\n  🕐 {get_ist_time()}"
     return text
 
 def get_risk_text():
     if not active_trades:
-        return (_YH("🛡  GUARD ASSESSMENT")+"\n\n"
-                f"  {YT_MOON}  No exposure — the realm is at peace.\n\n"
-                f"  🛡 CB  : {{'🔴 SEALED' if check_circuit_breaker() else '🟢 OPEN'}}\n"
-                f"  📉 Wounds : {{daily_losses}}/{{MAX_DAILY_LOSSES}}\n"
-                f"  🕐 {{get_ist_time()}}")
-    text=_YH("🛡  GUARD ASSESSMENT")+"\n\n"; total_risk=0.0
+        return (f"{_H('RISK MONITOR','🛡️')}\n\n"
+                f"  ⚪  No active trades — zero exposure.\n\n"
+                f"  🛡️ CB     : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
+                f"  📉 Losses : {daily_losses}/{MAX_DAILY_LOSSES}\n"
+                f"  🕐 {get_ist_time()}")
+    text=f"{_H('RISK MONITOR','🛡️')}\n\n"; total_risk=0.0
     for coin,t in active_trades.items():
         rp=abs(t["entry"]-t["sl"])/t["entry"]*100*t["leverage"]
         tp_pct=abs(t["tp"]-t["entry"])/t["entry"]*100
         sl_pct=abs(t["entry"]-t["sl"])/t["entry"]*100
         total_risk+=rp
-        filled=min(int(rp/5),10); bar="◈"*filled+"·"*(10-filled)
-        em=YT_LOSS if rp>20 else "🌙" if rp>10 else YT_WIN
+        filled=min(int(rp/5),10); bar="█"*filled+"░"*(10-filled)
+        em="🔴" if rp>20 else "🟡" if rp>10 else "🟢"
         text+=(f"  {em} <b>{coin}</b>  {t['direction']}  {t['leverage']}x\n"
-               f"  [{bar}]  Max wound: <b>{rp:.1f}%</b>\n"
-               f"  Guard dist: {sl_pct:.2f}%  Target dist: {tp_pct:.2f}%\n\n")
-    total_em=YT_LOSS if total_risk>40 else "🌙" if total_risk>20 else YT_WIN
-    text+=(f"{YT_DIV}\n"
-           f"  {total_em} Realm Exposure : <b>{total_risk:.1f}%</b>\n"
-           f"  ⚔️  Battles      : {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
-           f"  🛡  CB           : {{'🔴 SEALED' if check_circuit_breaker() else '🟢 OPEN'}}\n"
-           f"  📉 Wounds        : {{daily_losses}}/{MAX_DAILY_LOSSES}\n"
-           f"  ⏳ Scouts        : {{len(pending_signals)}}\n"
-           f"  🕐 {{get_ist_time()}}")
+               f"  [{bar}]  Max loss: <b>{rp:.1f}%</b>\n"
+               f"  SL dist: {sl_pct:.2f}%  TP dist: {tp_pct:.2f}%\n\n")
+    total_em="🔴" if total_risk>40 else "🟡" if total_risk>20 else "🟢"
+    text+=(f"  ══════════════════════════════\n"
+           f"  {total_em} Portfolio Risk : <b>{total_risk:.1f}%</b>\n"
+           f"  📌 Slots   : {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
+           f"  🛡️ CB      : {'🔴 ACTIVE' if check_circuit_breaker() else '🟢 OK'}\n"
+           f"  📉 Losses  : {daily_losses}/{MAX_DAILY_LOSSES}\n"
+           f"  ⏳ Pending : {len(pending_signals)}\n"
+           f"  🕐 {get_ist_time()}")
     return text
 
 def get_learning_text():
-    text=(_YH("🧠  SPIRIT MEMORY")+"\n\n"
-          f"  📜 <b>Realm Wisdom</b>\n\n")
-    icons={"bull":"🌸","bear":"🍂","sideways":"🌙"}
+    text=(f"{_H('BOT LEARNING','🧠')}\n\n"
+          f"  📊 <b>Market Memory</b>\n\n")
+    icons={"bull":"📈","bear":"📉","sideways":"➡️"}
     for cond in ["bull","bear","sideways"]:
         mem=market_memory[cond]; tot=mem["wins"]+mem["losses"]
         wr=(mem["wins"]/tot*100) if tot>0 else 0
-        text+=(f"  {icons.get(cond,'')} <b>{cond.capitalize()} Season</b>   {mem['wins']}W / {mem['losses']}L   {wr:.1f}%\n"
-               f"     Strongest: {mem['best_pattern'] or 'Unknown'}\n\n")
-    text+=(f"{YT_DIV}\n\n"
-           f"  ⛩ <b>Ancient Scrolls</b>\n\n")
+        text+=(f"  {icons.get(cond,'')} <b>{cond.capitalize()}</b>   {mem['wins']}W / {mem['losses']}L   {wr:.1f}%\n"
+               f"     Best: {mem['best_pattern'] or 'N/A'}\n\n")
+    text+=f"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     if learning_notes:
-        for note in learning_notes[-8:]: text+=f"  ▸ {note}\n"
+        text+=f"  💡 <b>Latest Insights</b>\n\n"
+        for note in learning_notes[-8:]: text+=f"  ◆ {note}\n"
     else:
-        text+="  🌙 Wisdom grows with each battle.\n"
+        text+=f"  💡 <b>Insights</b>\n\n  ⚪ No insights yet — keeps building as trades close.\n"
     text+=f"\n  🕐 {get_ist_time()}"
     return text
 
 def get_journal_text():
     if not trade_journal:
-        return _YH("📓  WAR CHRONICLE")+"\n\n  🌙 No battles recorded yet."
+        return f"{_H('TRADE JOURNAL','📓')}\n\n  ⚪ No trades recorded yet."
     recent=trade_journal[-10:][::-1]
-    text=_YH("📓  WAR CHRONICLE  (Last 10)")+"\n\n"
+    text=f"{_H('TRADE JOURNAL  (Last 10)','📓')}\n\n"
     for t in recent:
-        em=YT_WIN if t.get("result")=="WIN" else YT_LOSS
-        dirn_em="🌸" if t.get("direction")=="BUY" else "🍂"
+        em="✅" if t.get("result")=="WIN" else "🔴"
+        dirn_em="🟢" if t.get("direction")=="BUY" else "🔴"
         text+=(f"  {em} <b>{t.get('coin','?')}</b>  {dirn_em} {t.get('direction','?')}\n"
-               f"  ▸ {t.get('pattern','?')}\n"
-               f"  {fmt_pnl(t.get('pnl',0))}  ·  {t.get('duration','?')}  ·  {t.get('date','?')}\n\n")
+               f"  ◆ {t.get('pattern','?')}\n"
+               f"  💰 {fmt_pnl(t.get('pnl',0))}  ⏱️ {t.get('duration','?')}  📅 {t.get('date','?')}\n\n")
     total=len(trade_journal); wins=sum(1 for t in trade_journal if t.get("result")=="WIN")
     wr=(wins/total*100) if total>0 else 0
-    text+=(f"{YT_DIV}\n"
-           f"  Total battles: {total}   Honour rate: <b>{wr:.1f}%</b>\n"
+    text+=(f"  ══════════════════════════════\n"
+           f"  Total: {total}   Win Rate: <b>{wr:.1f}%</b>\n"
            f"  🕐 {get_ist_time()}")
     return text
 
 def get_patterns_ranked_text():
-    text=_YH("⚔️  TECHNIQUES RANKED")+"\n\n"
+    text=f"{_H('ALL PATTERNS RANKED','🌀')}\n\n"
     all_pats=[]
     for pat,s in pattern_stats.items():
         sigs=s.get("signals",0); wr=(s["wins"]/sigs*100) if sigs>0 else 0
         w=s.get("weight",1.0); adj=get_adjusted_score(pat,80,"bull")
         all_pats.append((pat,sigs,wr,w,adj))
     all_pats.sort(key=lambda x:x[4],reverse=True)
-    icons=["⛩","🗻","🌸"]+["▸"]*max(0,len(all_pats)-3)
+    medal_list=["🥇","🥈","🥉"]
     for i,(pat,sigs,wr,w,adj) in enumerate(all_pats):
-        icon=icons[i] if i<len(icons) else "▸"
-        flag=YT_LOSS if wr<40 and sigs>=5 else YT_WIN if wr>=60 else "🌙"
-        susp="  🔒 SEALED" if is_pattern_suspended(pat) else ""
-        wt="↑" if w>1.05 else "↓" if w<0.95 else "—"
-        filled=int(wr/10); bar="◈"*filled+"·"*(10-filled)
+        medal=medal_list[i] if i<len(medal_list) else f"{i+1}."
+        flag="🔴" if wr<40 and sigs>=5 else "🟢" if wr>=60 else "🟡"
+        susp="  🔒" if is_pattern_suspended(pat) else ""
+        wt="📈" if w>1.05 else "📉" if w<0.95 else "━"
+        filled=int(wr/10); bar="█"*filled+"░"*(10-filled)
         if sigs==0:
-            text+=f"  {icon} <b>{pat}</b>{susp}  <i>(未tested)</i>\n\n"
+            text+=f"  {medal} <b>{pat}</b>{susp}  <i>(no trades yet)</i>\n\n"
         else:
-            text+=(f"  {icon} <b>{pat}</b>{susp}\n"
+            text+=(f"  {medal} <b>{pat}</b>{susp}\n"
                    f"  {flag} [{bar}] {wr:.1f}%\n"
-                   f"  {sigs} battles · {wt}{w:.2f}x · Score:{adj:.1f}\n\n")
+                   f"  {sigs} trades · {wt}{w:.2f}x · Adj:{adj:.1f}\n\n")
+    if not all_pats:
+        text+="  ⚪ No pattern data yet.\n"
     text+=f"  🕐 {get_ist_time()}"
     return text
 
@@ -1577,27 +1516,11 @@ def get_trend_label(ema20,ema50,price,label):
     elif price>ema50: return "Ranging Above EMA50"
     else:             return "Ranging Below EMA50"
 
-def get_sr_levels(symbol):
-    """Returns (support, resistance, pivot) using 4h pivot points + swing structure."""
-    klines=get_klines(symbol,"4h",50)
-    if not klines or len(klines)<5: return 0,0,0
-    highs=[float(k[2]) for k in klines]; lows=[float(k[3]) for k in klines]
-    closes=[float(k[4]) for k in klines]
-    pivot=(highs[-2]+lows[-2]+closes[-2])/3
-    r1=2*pivot-lows[-2]; s1=2*pivot-highs[-2]
-    # Also check swing highs/lows from market structure
-    ms=detect_market_structure(klines)
-    if ms["swing_high"]>0 and abs(ms["swing_high"]-r1)/r1<0.03:
-        r1=(r1+ms["swing_high"])/2   # average of pivot R1 and swing high
-    if ms["swing_low"]>0 and abs(ms["swing_low"]-s1)/s1<0.03:
-        s1=(s1+ms["swing_low"])/2
-    return s1, r1, pivot
-
 def cmd_trend(coin_input):
     coin=coin_input.upper().replace("USDT","").strip()
     symbol=coin+"USDT"; price=get_price(symbol)
     if not price:
-        return f"{_YH(f'刀  REALM OF {coin}')}\n\n  ❌ Could not fetch price for <b>{coin}</b>."
+        return f"{_H(f'TREND  {coin}','📉')}\n\n  ❌ Could not fetch price for <b>{coin}</b>."
     tfs=[("1d","Daily"),("4h","4 Hour"),("1h","1 Hour"),("15m","15 Min")]
     results=[]; bull_c=bear_c=0
     for tf,label in tfs:
@@ -1610,45 +1533,33 @@ def cmd_trend(coin_input):
         if "Uptrend" in trend:   bull_c+=1
         if "Downtrend" in trend: bear_c+=1
         results.append((label,trend,rsi,adx))
-    if bull_c>=3:   bias="STRONGLY BULLISH 🚀"; bias_em=YT_WIN
-    elif bull_c>=2: bias="BULLISH 📈";           bias_em=YT_WIN
-    elif bear_c>=3: bias="STRONGLY BEARISH 🔻"; bias_em=YT_LOSS
-    elif bear_c>=2: bias="BEARISH 📉";           bias_em=YT_LOSS
-    else:           bias="MIXED / SIDEWAYS ➡️"; bias_em="🌙"
-    sup,res,pivot=get_sr_levels(symbol)
-    res_dist=abs(res-price)/price*100 if res>0 else 0
-    sup_dist=abs(price-sup)/price*100 if sup>0 else 0
+    if bull_c>=3:   bias="STRONGLY BULLISH 🚀"; bias_em="🟢"
+    elif bull_c>=2: bias="BULLISH 📈";           bias_em="🟢"
+    elif bear_c>=3: bias="STRONGLY BEARISH 🔻"; bias_em="🔴"
+    elif bear_c>=2: bias="BEARISH 📉";           bias_em="🔴"
+    else:           bias="MIXED / SIDEWAYS ➡️"; bias_em="🟡"
+    klines_4h=get_klines(symbol,"4h",30); s1=r1=0
+    if klines_4h and len(klines_4h)>=5:
+        highs=[float(k[2]) for k in klines_4h]; lows=[float(k[3]) for k in klines_4h]
+        c4=[float(k[4]) for k in klines_4h]
+        pivot=(highs[-2]+lows[-2]+c4[-2])/3
+        r1=2*pivot-lows[-2]; s1=2*pivot-highs[-2]
     rsi_1h=results[2][2] if len(results)>2 else 50
     adx_1h=results[2][3] if len(results)>2 else 0
-    text=(_YH(f"刀  REALM OF {coin}")+"\n\n"
+    text=(f"{_H(f'TREND ANALYSIS  {coin}','📉')}\n\n"
           f"  💰 Price  : <code>{format_price(price)}</code>\n"
           f"  {bias_em} Bias   : <b>{bias}</b>\n\n"
-          f"{YT_DIV}\n"
-          f"  ⚔️ <b>Timeframe Scrolls</b>\n\n")
+          f"  ┌── TIMEFRAMES ───────────────┐\n")
     for label,trend,rsi,adx in results:
-        em=YT_WIN if "Up" in trend else YT_LOSS if "Down" in trend else "🌙"
-        text+=f"  {em} <b>{label:<8}</b> {trend}  RSI:{rsi:.0f}\n"
-    text+=(f"\n{YT_DIV}\n"
-           f"  🚧 <b>Key Battlegrounds</b>\n\n"
-           f"  🚧 Resistance : <code>{format_price(res)}</code>  ({res_dist:.2f}% above)\n"
-           f"  ⛩ Pivot      : <code>{format_price(pivot)}</code>\n"
-           f"  🛡 Support    : <code>{format_price(sup)}</code>  ({sup_dist:.2f}% below)\n\n"
-           f"  📊 RSI(1h): {rsi_1h:.1f}   ADX: {adx_1h:.1f}\n\n"
+        em="🟢" if "Up" in trend else "🔴" if "Down" in trend else "🟡"
+        text+=f"  │  {em} <b>{label:<8}</b> {trend}\n"
+    text+=(f"  └─────────────────────────────┘\n\n"
+           f"  ┌── KEY LEVELS ───────────────┐\n"
+           f"  │  🎯 Resistance : <code>{format_price(r1)}</code>\n"
+           f"  │  🛡️ Support    : <code>{format_price(s1)}</code>\n"
+           f"  │  📊 RSI(1h)   : {rsi_1h:.1f}   ADX: {adx_1h:.1f}\n"
+           f"  └─────────────────────────────┘\n\n"
            f"  🕐 {get_ist_time()}")
-
-    # If this is BTC trend, also show all active coin levels
-    if coin=="BTC" and active_trades:
-        text+=f"\n{YT_DIV}\n  ⚔️ <b>Active Coin Battlegrounds</b>\n\n"
-        for ac,t in active_trades.items():
-            ap=get_price(t.get("symbol",ac+"USDT"))
-            if not ap: continue
-            a_sup,a_res,_=get_sr_levels(t.get("symbol",ac+"USDT"))
-            a_res_d=abs(a_res-ap)/ap*100 if a_res>0 else 0
-            a_sup_d=abs(ap-a_sup)/ap*100 if a_sup>0 else 0
-            dirn_em="🌸" if t.get("direction")=="BUY" else "🍂"
-            text+=(f"  {dirn_em} <b>{ac}</b>  <code>{format_price(ap)}</code>\n"
-                   f"  🚧 Res: <code>{format_price(a_res)}</code>  +{a_res_d:.2f}%\n"
-                   f"  🛡 Sup: <code>{format_price(a_sup)}</code>  -{a_sup_d:.2f}%\n\n")
     return text
 
 def cmd_market():
@@ -1939,98 +1850,6 @@ def cmd_hidden_gems():
     msg += (f"  ⚠️ <i>Always confirm before trading</i>\n"
             f"  🕐 {get_ist_time()}")
     return msg
-
-def cmd_trade_suggestions():
-    """
-    Analyses every active trade and gives a clear suggestion:
-    HOLD / TAKE PROFIT / WATCH OUT / REVERSE RISK / EXIT NOW
-    Based on live price vs TP/SL distance, RSI, trend, momentum.
-    """
-    if not active_trades:
-        return (_YH("🔮  BATTLE COUNSEL")+"\n\n"
-                f"  {YT_MOON}  No open battles to counsel.\n\n"
-                f"  🕐 {get_ist_time()}")
-
-    text=_YH("🔮  BATTLE COUNSEL")+"\n\n"
-    text+=f"  📜 Wisdom for each open battle:\n\n"
-
-    for coin,t in active_trades.items():
-        symbol=t.get("symbol",coin+"USDT")
-        price=get_price(symbol)
-        if not price: continue
-
-        dirn=t.get("direction","BUY"); entry=t["entry"]
-        tp=t["tp"]; sl=t["sl"]; lev=t.get("leverage",1)
-
-        # Live PnL
-        if dirn=="BUY": pnl=((price-entry)/entry)*100*lev
-        else:           pnl=((entry-price)/entry)*100*lev
-
-        # Distance to TP and SL
-        dist_tp=abs(tp-price)/price*100
-        dist_sl=abs(price-sl)/price*100
-        tp_pct=abs(tp-entry)/entry*100
-        progress=pnl/tp_pct*100 if tp_pct>0 else 0  # % of the way to target
-
-        # Fetch indicators
-        klines=get_klines(symbol,"1h",50)
-        rsi=50; trend_label="N/A"; mom=0
-        if klines and len(klines)>3:
-            closes=[float(k[4]) for k in klines]
-            rsi=calculate_rsi(closes)
-            e20=calculate_ema(closes,20); e50=calculate_ema(closes,50)
-            trend_label=get_trend_label(e20,e50,price,"1h")
-            mom=(closes[-1]-closes[-4])/closes[-4]*100 if len(closes)>=4 else 0
-
-        # S/R levels
-        sup,res,_=get_sr_levels(symbol)
-
-        # ── Suggestion logic ──
-        is_near_tp   = dist_tp < tp_pct*0.1           # within 10% of TP
-        is_near_sl   = dist_sl < abs(entry-sl)/entry*100*0.15  # within 15% of SL
-        trend_favours= ("Up" in trend_label and dirn=="BUY") or ("Down" in trend_label and dirn=="SELL")
-        rsi_extreme  = (rsi>72 and dirn=="BUY") or (rsi<28 and dirn=="SELL")
-        mom_fading   = (mom<-1.5 and dirn=="BUY") or (mom>1.5 and dirn=="SELL")
-        # Price approaching key level against trade
-        near_bad_level=((dirn=="BUY" and res>0 and abs(price-res)/price<0.015) or
-                        (dirn=="SELL" and sup>0 and abs(price-sup)/price<0.015))
-
-        if pnl>=0 and is_near_tp:
-            suggestion="🌸 TAKE PROFIT — target almost reached"
-            detail=f"Price is {dist_tp:.1f}% from target. Consider closing or moving SL tight."
-        elif pnl>0 and (rsi_extreme or mom_fading or near_bad_level):
-            suggestion="⚠️ WATCH OUT — momentum fading"
-            detail=("RSI overbought/oversold" if rsi_extreme else
-                    "Momentum reversing" if mom_fading else
-                    "Price near key resistance/support level")
-        elif pnl<0 and is_near_sl:
-            suggestion="🍂 EXIT NOW — SL almost hit"
-            detail=f"Price is {dist_sl:.1f}% from your stop loss. Prepare to exit."
-        elif pnl<0 and not trend_favours:
-            suggestion="🌙 REVERSE RISK — trend against you"
-            detail=f"1h trend: {trend_label}. Consider tightening SL."
-        elif trend_favours and not rsi_extreme and pnl>=0:
-            suggestion="⚔️ HOLD — trend aligned, target in sight"
-            detail=f"{progress:.0f}% of the way to target. Let it run."
-        else:
-            suggestion="📜 HOLD — no strong signal to act"
-            detail="Market is undecided. Maintain current SL."
-
-        dirn_em="🌸 LONG" if dirn=="BUY" else "🍂 SHORT"
-        text+=(f"{YT_DIV}\n"
-               f"  🪙 <b>{coin}</b>  {dirn_em}  •  {fmt_pnl(pnl)}\n\n"
-               f"  {suggestion}\n"
-               f"  ▸ {detail}\n\n"
-               f"  ▸ Progress  : {progress:.0f}% to target\n"
-               f"  ▸ RSI(1h)   : {rsi:.1f}\n"
-               f"  ▸ Momentum  : {mom:+.2f}%\n"
-               f"  ▸ Trend(1h) : {trend_label}\n")
-        if res>0: text+=f"  🚧 Resistance: <code>{format_price(res)}</code>\n"
-        if sup>0: text+=f"  🛡 Support   : <code>{format_price(sup)}</code>\n"
-        text+="\n"
-
-    text+=f"{YT_BOT}\n  🕐 {get_ist_time()}"
-    return text
 
 def expire_pending_signals():
     now=get_ist_datetime()
@@ -2425,222 +2244,277 @@ def poll_telegram():
     global last_update_id
     while True:
         try:
-            params={"timeout":10}
+            params={}
             if last_update_id is not None: params["offset"]=last_update_id+1
             res=requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-                             params=params,timeout=20)
+                             params=params,timeout=15)
             if res.status_code!=200: time.sleep(2); continue
-            updates=res.json().get("result",[])
-            for update in updates:
+            for update in res.json().get("result",[]):
                 last_update_id=update["update_id"]
-                try:
-                    # ── BUTTON CALLBACKS ────────────────────────────────
-                    if "callback_query" in update:
-                        cb=update["callback_query"]
-                        data=cb.get("data",""); cbid=cb.get("id","")
-                        answer_callback(cbid,"Processing...")
-                        logger.info(f"CALLBACK: '{data}' pending={list(pending_signals.keys())}")
-                        if not data or "_" not in data: continue
-                        action,coin=data.split("_",1)
-                        logger.info(f"action={action} coin={coin} in_pending={coin in pending_signals}")
+                if "callback_query" in update:
+                    cb=update["callback_query"]
+                    data=cb.get("data","")
+                    cbid=cb.get("id","")
+                    answer_callback(cbid,"Processing...")
+                    logger.info(f"Callback received: data={data} pending={list(pending_signals.keys())}")
+                    if data and "_" in data:
+                        action=data.split("_",1)[0]
+                        coin=data.split("_",1)[1]
                         if action=="ACTIVATE":
                             if coin in pending_signals:
-                                try:
-                                    sig=dict(pending_signals[coin])
-                                    lp=get_price(sig.get("symbol",coin+"USDT"))
-                                    if lp and lp>0: sig["entry"]=lp
-                                    ep  =float(sig.get("entry",0) or 0)
-                                    sl_p=float(sig.get("sl",0) or 0)
-                                    tp_p=float(sig.get("tp",0) or 0)
-                                    lev =int(sig.get("leverage",5) or 5)
-                                    dirn=str(sig.get("direction","BUY"))
-                                    pat =str(sig.get("pattern","?"))
-                                    sig.update({"breakeven_sent":False,"partial_tp_taken":False,
-                                                "reversal_alerted":False,"milestones_sent":[],
-                                                "timestamp":get_ist_datetime(),"expires_at":None})
-                                    sl_pct=abs(ep-sl_p)/ep*100 if ep>0 else 2.0
-                                    tp_pct=abs(tp_p-ep)/ep*100 if ep>0 else 5.0
-                                    pt=tp_pct*lev; sig["profit_target"]=pt
-                                    unit=ep/lev if lev>0 else ep*0.01
-                                    if dirn=="BUY":
-                                        ms1=ep; ms2=ep+unit*(pt*0.60/100)*0.5*lev; ms3=ep+unit*(pt*0.85/100)*0.8*lev
-                                    else:
-                                        ms1=ep; ms2=ep-unit*(pt*0.60/100)*0.5*lev; ms3=ep-unit*(pt*0.85/100)*0.8*lev
-                                    rr=round(tp_pct/sl_pct,1) if sl_pct>0 else 0
-                                    active_trades[coin]=sig
-                                    del pending_signals[coin]
-                                    save_active_trades(); save_pending_signals()
-                                    dir_arrow="LONG" if dirn=="BUY" else "SHORT"
-                                    send_telegram(
-                                        f"ACTIVATED: {coin} {dir_arrow} {lev}x\n\n"
-                                        f"Entry  : {format_price(ep)}\n"
-                                        f"Target : {format_price(tp_p)}  +{tp_pct:.2f}%\n"
-                                        f"Guard  : {format_price(sl_p)}  -{sl_pct:.2f}%\n"
-                                        f"RR     : 1:{rr}\n"
-                                        f"Max    : +{pt:.1f}%\n\n"
-                                        f"Milestones:\n"
-                                        f"+{pt*0.30:.1f}% -> SL to {format_price(ms1)} (breakeven)\n"
-                                        f"+{pt*0.60:.1f}% -> SL to {format_price(ms2)} (lock 50%)\n"
-                                        f"+{pt*0.85:.1f}% -> SL to {format_price(ms3)} (lock 80%)\n\n"
-                                        f"Pattern: {pat}\n{get_ist_time()}", parse_mode="")
-                                    logger.info(f"ACTIVATED: {coin}|{dirn}|{ep}|{lev}x")
-                                except Exception as e:
-                                    logger.error(f"ACTIVATE error {coin}: {e}")
-                                    send_telegram(f"Activation error {coin}: {str(e)[:150]}", parse_mode="")
+                                lp=get_price(pending_signals[coin].get("symbol",coin+"USDT"))
+                                if lp and lp>0: pending_signals[coin]["entry"]=lp
+                                pending_signals[coin]["breakeven_sent"]=False
+                                pending_signals[coin]["partial_tp_taken"]=False
+                                pending_signals[coin]["reversal_alerted"]=False
+                                pending_signals[coin]["milestones_sent"]=[]
+                                pending_signals[coin]["timestamp"]=get_ist_datetime()
+                                pending_signals[coin]["expires_at"]=None
+                                with trade_lock:
+                                    active_trades[coin]=pending_signals[coin]
+                                save_active_trades()
+                                t=active_trades[coin]
+                                ep=t.get("entry",0); sl_p=t.get("sl",0); tp_p=t.get("tp",0)
+                                lev=t.get("leverage",5); dirn=t.get("direction","?"); pat=t.get("pattern","?")
+                                sl_pct=abs(ep-sl_p)/ep*100 if ep>0 else 0
+                                tp_pct=abs(tp_p-ep)/ep*100 if ep>0 else 0
+                                rr=round(tp_pct/sl_pct,1) if sl_pct>0 else 0
+                                if dirn=="BUY":
+                                    sl_10=format_price(ep); sl_20=format_price(ep+(tp_p-ep)*0.5); sl_35=format_price(ep+(tp_p-ep)*0.75)
+                                else:
+                                    sl_10=format_price(ep); sl_20=format_price(ep-(ep-tp_p)*0.5); sl_35=format_price(ep-(ep-tp_p)*0.75)
+                                dir_em2 = "🟢 LONG" if dirn=="BUY" else "🔴 SHORT"
+                                send_telegram(
+                                    f"🚀 <b>TRADE ACTIVATED</b>\n"
+                                    f"⚙️ <b>TRADING SIGNAL MASTER v32G</b>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                                    f"🪙 <b>{coin}</b>  {dir_em2}  🔧 <b>{lev}x</b>\n"
+                                    f"⚖️ Risk/Reward: <b>1:{rr}</b>\n\n"
+                                    f"💰 <b>Entry</b>    <code>{format_price(ep)}</code>\n"
+                                    f"🎯 <b>Target</b>   <code>{format_price(tp_p)}</code>  (+{tp_pct:.1f}%)\n"
+                                    f"🛑 <b>Stop</b>     <code>{format_price(sl_p)}</code>  (-{sl_pct:.1f}%)\n\n"
+                                    f"📌 Pattern: {pat}\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📋 <b>Milestone Plan:</b>\n"
+                                    f"  🎯 +10% → Move SL to <code>{sl_10}</code>\n"
+                                    f"  🎯 +20% → Move SL to <code>{sl_20}</code>\n"
+                                    f"  🚀 +35% → Move SL to <code>{sl_35}</code>\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"✏️ Set your trade on CoinDCX now!\n"
+                                    f"🕐 {get_ist_time()}"
+                                )
+                                del pending_signals[coin]
+                                save_pending_signals()
+                                logger.info(f"ACTIVATED: {coin}|{dirn}|Entry:{ep}|{lev}x")
                             else:
-                                logger.warning(f"ACTIVATE: {coin} not in pending={list(pending_signals.keys())}")
-                                send_telegram(f"Signal expired: {coin}\nPending: {', '.join(pending_signals.keys()) or 'none'}\n{get_ist_time()}", parse_mode="")
+                                send_telegram(f"⏰ <b>{BOT_HEADER}</b>\nSignal for {coin} expired.\nWait for next signal.")
+                                logger.warning(f"ACTIVATE failed: {coin} not in pending={list(pending_signals.keys())}")
                         elif action=="IGNORE":
-                            if coin in pending_signals:
-                                del pending_signals[coin]; save_pending_signals()
-                            send_telegram(f"Ignored: {coin}", parse_mode="")
-                    # ── TEXT COMMANDS & MENU BUTTONS ────────────────────
-                    elif "message" in update:
-                        txt=update["message"].get("text","").strip().lower()
-                        txt_s=txt  # slash commands
-                        txt_c=txt.replace('\ufe0f','').replace('\ufe0e','').strip()
-                        if   txt_s=="/trades":    safe_send(get_active_trades_text,"Trades")
-                        elif txt_s=="/pending" or txt_c=="⏳ pending":
-                            if pending_signals:
-                                msg=f"PENDING ({len(pending_signals)})\n\n"
-                                for c,s in pending_signals.items():
-                                    exp=s.get("expires_at"); es=exp.strftime("%I:%M %p") if isinstance(exp,datetime) else "N/A"
-                                    msg+=f"{c} {s.get('direction','?')} Score:{s.get('setup_score',0):.0f} Exp:{es}\n"
-                                send_telegram(msg, parse_mode="")
-                            else: send_telegram("No pending signals.", parse_mode="")
-                        elif txt_s=="/stats":      safe_send(get_pattern_stats_text,"Stats")
-                        elif txt_s=="/summary":    safe_send(get_10day_summary_text,"Summary")
-                        elif txt_s=="/streak":     safe_send(get_streak_text,"Streak")
-                        elif txt_s=="/best":       safe_send(get_best_text,"Best")
-                        elif txt_s=="/risk":       safe_send(get_risk_text,"Risk")
-                        elif txt_s=="/learn":      safe_send(get_learning_text,"Learn")
-                        elif txt_s=="/journal":    safe_send(get_journal_text,"Journal")
-                        elif txt_s=="/patterns":   safe_send(get_patterns_ranked_text,"Patterns")
-                        elif txt_s=="/news":       send_telegram("Fetching...",parse_mode=""); safe_send(get_crypto_news,"News")
-                        elif txt_s=="/gems":       safe_send(cmd_hidden_gems,"Gems")
-                        elif txt_s=="/counsel":    safe_send(cmd_trade_suggestions,"Counsel")
-                        elif txt_s=="/market":     safe_send(cmd_market,"Market")
-                        elif txt_s=="/cb":
-                            cb_on=check_circuit_breaker()
-                            send_telegram(f"CB: {'ACTIVE' if cb_on else 'OK'} | Losses: {daily_losses}/{MAX_DAILY_LOSSES}", parse_mode="")
-                        elif txt_s in ("/status","📡 status"):
-                            btc_p=get_price("BTCUSDT"); fng=get_fear_greed_index()
-                            btc_k=get_klines("BTCUSDT","1h",50)
-                            bt_e=calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
-                            bt=1 if (btc_p and bt_e and btc_p>bt_e) else -1
-                            mc=detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "unknown"
-                            sess=is_good_trading_session(); cb_s=check_circuit_breaker()
-                            send_telegram(
-                                f"STATUS\nSession:{'ACTIVE' if sess else 'DEAD'} CB:{'ACTIVE' if cb_s else 'OK'}\n"
-                                f"BTC:{'BULL' if bt==1 else 'BEAR'} Market:{mc} F&G:{fng}\n"
-                                f"Trades:{len(active_trades)}/{MAX_ACTIVE_TRADES} Pending:{len(pending_signals)}\n"
-                                f"Score min:{MIN_SETUP_SCORE}\n{get_ist_time()}", parse_mode="")
-                        elif txt_s.startswith("/trend"):
-                            parts=txt.split(); c2=parts[1].upper() if len(parts)>1 else "BTC"
-                            safe_send(lambda c=c2: cmd_trend(c),"Trend")
-                        elif txt_s.startswith("/compare"):
-                            parts=txt.split(maxsplit=1); cs=parts[1].upper() if len(parts)>1 else "BTC ETH"
-                            safe_send(lambda x=cs: cmd_compare(x),"Compare")
-                        elif txt_s=="/scan":
-                            bp=get_price("BTCUSDT"); bk=get_klines("BTCUSDT","1h",50)
-                            be=calculate_ema([float(x[4]) for x in bk],50) if bk else None
-                            bt2=1 if (bp and be and bp>be) else -1
-                            fg2=get_fear_greed_index(); mc2=detect_market_condition(bp,bk) if bp and bk else "sideways"
-                            send_telegram(cmd_scan_manual(bt2,fg2,mc2))
-                        elif txt_s.startswith("/alert "):
-                            parts=txt.split()
-                            if len(parts)>=4:
-                                try:
-                                    sym=parts[1].upper(); tgt=float(parts[2]); dr=parts[3].lower()
-                                    price_alerts[sym]={"price":tgt,"direction":dr}; save_alerts()
-                                    send_telegram(f"Alert set: {sym} {dr} {format_price(tgt)}", parse_mode="")
-                                except Exception: send_telegram("Usage: /alert BTC 95000 above", parse_mode="")
-                            else: send_telegram("Usage: /alert BTC 95000 above", parse_mode="")
-                        elif txt_s=="/alerts":
-                            if price_alerts:
-                                msg="\n".join(f"{s}:{a['direction']} {format_price(a['price'])}" for s,a in price_alerts.items())
-                                send_telegram(f"Alerts:\n{msg}", parse_mode="")
-                            else: send_telegram("No alerts set.", parse_mode="")
-                        elif txt_s.startswith("/backtest"):
-                            parts=txt.split(); bc=(parts[1].upper() if len(parts)>1 else "BTC")+"USDT"
-                            send_telegram(f"Backtest {bc}...", parse_mode=""); safe_send(lambda b=bc: run_backtest(b),"Backtest")
-                        elif txt_s in ("/start","/help","/menu"):
-                            menu_kb={"keyboard":[
+                            if coin in pending_signals: del pending_signals[coin]
+                            save_pending_signals()
+                            send_telegram(f"❌ <b>{BOT_HEADER}</b>\n{coin} signal ignored.")
+                elif "message" in update:
+                    txt=update["message"].get("text","").strip().lower()
+                    txt_slash=txt  # for slash commands (already lowercase)
+                    txt_clean = txt.replace('\ufe0f','').replace('\ufe0e','').strip()
+                    if   txt_slash=="/trades":   safe_send(get_active_trades_text,"📊 Trades")
+                    elif txt_slash=="/pending":
+                        if pending_signals:
+                            msg=f"{_H('PENDING SIGNALS','⏳')}\n\n"
+                            for c,s in pending_signals.items():
+                                exp=s.get("expires_at"); exp_str=exp.strftime("%I:%M %p IST") if isinstance(exp,datetime) else "N/A"
+                                dirn_em="🟢 LONG" if s.get("direction")=="BUY" else "🔴 SHORT"
+                                msg+=(f"  🪙 <b>{c}</b>  {dirn_em}\n"
+                                      f"  ◆ {s.get('pattern','?')}\n"
+                                      f"  Score: {s.get('setup_score',0):.0f}  ⏰ {exp_str}\n\n")
+                            msg+=f"  🕐 {get_ist_time()}"
+                            send_telegram(msg)
+                        else: send_telegram(f"{_H('PENDING SIGNALS','⏳')}\n\n  ⚪ No pending signals.\n\n  🕐 {get_ist_time()}")
+                    elif txt_slash=="/stats":    safe_send(get_pattern_stats_text,"📈 Stats")
+                    elif txt_slash=="/summary":  safe_send(get_10day_summary_text,"📅 Summary")
+                    elif txt_slash=="/streak":   safe_send(get_streak_text,"🔥 Streak")
+                    elif txt_slash=="/best":     safe_send(get_best_text,"🏆 Best")
+                    elif txt_slash=="/risk":     safe_send(get_risk_text,"🛡️ Risk")
+                    elif txt_slash=="/learn":    safe_send(get_learning_text,"🧠 Learn")
+                    elif txt_slash=="/journal":  safe_send(get_journal_text,"📓 Journal")
+                    elif txt_slash=="/patterns": safe_send(get_patterns_ranked_text,"🌀 Patterns")
+                    elif txt_slash=="/news":
+                        send_telegram(f"⚙️ Fetching latest news...")
+                        safe_send(get_crypto_news,"📰 News")
+                    elif txt_slash=="/gems":    safe_send(cmd_hidden_gems,"💎 Hidden Gems")
+                    elif txt_slash=="/market":   safe_send(cmd_market,"🌍 Market")
+                    elif txt_slash=="/cb":
+                        cb_on=check_circuit_breaker()
+                        send_telegram(
+                            f"{_H('CIRCUIT BREAKER','⚡')}\n\n"
+                            f"  Status   : {'🔴 ACTIVE — paused' if cb_on else '🟢 OK — scanning'}\n"
+                            f"  Losses   : {daily_losses}/{MAX_DAILY_LOSSES}\n"
+                            f"  Resets   : Midnight IST\n\n"
+                            f"  🕐 {get_ist_time()}"
+                        )
+                    elif txt_slash.startswith("/trend"):
+                        parts=txt.split(); coin2=parts[1].upper() if len(parts)>1 else "BTC"
+                        safe_send(lambda: cmd_trend(coin2),"📉 Trend")
+                    elif txt_slash.startswith("/compare"):
+                        parts=txt.split(maxsplit=1); coins_str=parts[1].upper() if len(parts)>1 else "BTC ETH SOL"
+                        safe_send(lambda: cmd_compare(coins_str),"🆚 Compare")
+                    elif txt_slash=="/scan":
+                        btc_p=get_price("BTCUSDT"); btc_k=get_klines("BTCUSDT","1h",50)
+                        bt_e50=calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
+                        bt=1 if (btc_p and bt_e50 and btc_p>bt_e50) else -1
+                        fng2=get_fear_greed_index(); mc2=detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "sideways"
+                        send_telegram(cmd_scan_manual(bt,fng2,mc2))
+                    elif txt_slash.startswith("/alert "):
+                        parts=txt.split()
+                        if len(parts)>=4:
+                            try:
+                                sym=parts[1].upper(); target=float(parts[2]); direction=parts[3].lower()
+                                price_alerts[sym]={"price":target,"direction":direction}; save_alerts()
+                                send_telegram(f"🔔 Alert set: {sym} {direction} {format_price(target)}")
+                            except Exception: send_telegram("Usage: /alert BTC 95000 above")
+                        else: send_telegram("Usage: /alert BTC 95000 above")
+                    elif txt_slash=="/alerts":
+                        if price_alerts:
+                            msg=f"<b>{BOT_HEADER} Alerts</b>\n{S()}\n\n"
+                            for sym,a in price_alerts.items(): msg+=f"{sym}: {a['direction']} {format_price(a['price'])}\n"
+                            send_telegram(msg)
+                        else: send_telegram(f"<b>{BOT_HEADER}</b>\nNo alerts set.")
+                    elif txt_slash.startswith("/backtest"):
+                        parts=txt.split(); bc=(parts[1].upper() if len(parts)>1 else "BTC")+"USDT"
+                        send_telegram(f"Running backtest for {bc}...")
+                        send_telegram(run_backtest(bc))
+                    elif txt_slash in ("/start","/help","/menu"):
+                        menu_kb={
+                            "keyboard":[
                                 [{"text":"📊 Trades"},   {"text":"⏳ Pending"},   {"text":"📈 Stats"}],
                                 [{"text":"📅 Summary"},  {"text":"🔥 Streak"},    {"text":"🏆 Best"}],
                                 [{"text":"🛡 Risk"},     {"text":"🧠 Learn"},     {"text":"📓 Journal"}],
                                 [{"text":"🌀 Patterns"}, {"text":"📰 News"},      {"text":"🌍 Market"}],
                                 [{"text":"🔍 Scan"},     {"text":"⚡ CB Status"}, {"text":"📡 Status"}],
                                 [{"text":"🔔 Alerts"},   {"text":"📉 Trend BTC"}, {"text":"💎 Hidden Gems"}],
-                                [{"text":"🔮 Counsel"},  {"text":"🌐 Multi Trend"},{"text":"📜 Quick Stats"}],
-                            ],"resize_keyboard":True,"persistent":True}
-                            send_telegram(_YH("TRADING SIGNAL MASTER v32G","⚔️")+
-                                f"\n\n/trades /pending /stats /summary /streak\n"
-                                f"/best /risk /learn /journal /patterns\n"
-                                f"/news /market /scan /cb /status /alerts\n"
-                                f"/trend BTC /compare BTC ETH /gems /counsel\n"
-                                f"/backtest BTC\n\n{get_ist_time()}", reply_markup=menu_kb)
-                        # ── Menu button taps (txt_c = cleaned text) ──
-                        elif txt_c=="📊 trades":    safe_send(get_active_trades_text,"Trades")
-                        elif txt_c=="📈 stats":     safe_send(get_pattern_stats_text,"Stats")
-                        elif txt_c=="📅 summary":   safe_send(get_10day_summary_text,"Summary")
-                        elif txt_c=="🔥 streak":    safe_send(get_streak_text,"Streak")
-                        elif txt_c=="🏆 best":      safe_send(get_best_text,"Best")
-                        elif txt_c in("🛡️ risk","🛡 risk"): safe_send(get_risk_text,"Risk")
-                        elif txt_c=="🧠 learn":     safe_send(get_learning_text,"Learn")
-                        elif txt_c=="📓 journal":   safe_send(get_journal_text,"Journal")
-                        elif txt_c=="🌀 patterns":  safe_send(get_patterns_ranked_text,"Patterns")
-                        elif txt_c=="📰 news":      send_telegram("Fetching...",parse_mode=""); safe_send(get_crypto_news,"News")
-                        elif txt_c=="🌍 market":    safe_send(cmd_market,"Market")
-                        elif txt_c=="🔍 scan":
-                            bp=get_price("BTCUSDT"); bk=get_klines("BTCUSDT","1h",50)
-                            be=calculate_ema([float(x[4]) for x in bk],50) if bk else None
-                            bt2=1 if (bp and be and bp>be) else -1
-                            fg2=get_fear_greed_index(); mc2=detect_market_condition(bp,bk) if bp and bk else "sideways"
-                            safe_send(lambda: cmd_scan_manual(bt2,fg2,mc2),"Scan")
-                        elif txt_c in("⚡ cb status","⚡ cb"):
-                            cb_on=check_circuit_breaker()
-                            send_telegram(f"CB:{'ACTIVE' if cb_on else 'OK'} Losses:{daily_losses}/{MAX_DAILY_LOSSES}", parse_mode="")
-                        elif txt_c in("📡 status","📡status"):
-                            btc_p=get_price("BTCUSDT"); fng=get_fear_greed_index()
-                            btc_k=get_klines("BTCUSDT","1h",50)
-                            bt_e=calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
-                            bt=1 if (btc_p and bt_e and btc_p>bt_e) else -1
-                            mc=detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "unknown"
-                            sess=is_good_trading_session(); cb_s=check_circuit_breaker()
-                            send_telegram(
-                                f"STATUS\nSession:{'ACTIVE' if sess else 'DEAD'} CB:{'ACTIVE' if cb_s else 'OK'}\n"
-                                f"BTC:{'BULL' if bt==1 else 'BEAR'} F&G:{fng} Market:{mc}\n"
-                                f"Trades:{len(active_trades)}/{MAX_ACTIVE_TRADES} Pending:{len(pending_signals)}\n{get_ist_time()}", parse_mode="")
-                        elif txt_c=="🔔 alerts":
-                            if price_alerts:
-                                msg="\n".join(f"{s}:{a['direction']} {format_price(a['price'])}" for s,a in price_alerts.items())
-                                send_telegram(f"Alerts:\n{msg}", parse_mode="")
-                            else: send_telegram("No alerts.", parse_mode="")
-                        elif txt_c.startswith("📉 trend"):
-                            parts=txt_c.split(); cn=(parts[-1].upper() if len(parts)>1 and parts[-1].upper()!="TREND" else "BTC")+"USDT"
-                            safe_send(lambda c=cn: cmd_trend(c),"Trend")
-                        elif txt_c in("💎 hidden gems","/gems"):  safe_send(cmd_hidden_gems,"Gems")
-                        elif txt_c in("🔮 counsel","/counsel"):   safe_send(cmd_trade_suggestions,"Counsel")
-                        elif txt_c in("🌐 multi trend","/multitrend"): safe_send(lambda: cmd_trend("BTC"),"Multi Trend")
-                        elif txt_c in("📜 quick stats","/quickstats"):
-                            total=len(trade_journal); wins=sum(1 for t in trade_journal if t.get("result")=="WIN")
-                            wr=(wins/total*100) if total>0 else 0
-                            today=str(datetime.now(IST).date())
-                            td=[t for t in trade_journal if t.get("date")==today]
-                            tw=sum(1 for t in td if t.get("result")=="WIN"); tl=sum(1 for t in td if t.get("result")=="LOSS")
-                            tpnl=sum(t.get("pnl",0) for t in td)
-                            btc=get_price("BTCUSDT"); fng=get_fear_greed_index()
-                            send_telegram(
-                                f"TODAY: {tw}W/{tl}L PnL:{fmt_pnl(tpnl)}\n"
-                                f"ALL TIME: {total} trades WR:{wr:.1f}%\n"
-                                f"BTC:${format_price(btc) if btc else 'N/A'} F&G:{fng}\n"
-                                f"Open:{len(active_trades)}/{MAX_ACTIVE_TRADES} Pending:{len(pending_signals)}\n{get_ist_time()}", parse_mode="")
-                except Exception as upd_e:
-                    logger.error(f"Update error: {upd_e}", exc_info=True)
+                            ],
+                            "resize_keyboard":True,
+                            "persistent":True
+                        }
+                        send_telegram(
+                            f"{_H('TRADING SIGNAL MASTER v32G','⚙️')}\n\n"
+                            f"  Tap a button or type a command:\n\n"
+                            f"  📊 /trades    — Active trades\n"
+                            f"  ⏳ /pending   — Pending signals\n"
+                            f"  📈 /stats     — Pattern stats\n"
+                            f"  📅 /summary   — 10-day summary\n"
+                            f"  🔥 /streak    — Win/loss streak\n"
+                            f"  🏆 /best      — Top performers\n"
+                            f"  🛡 /risk      — Risk exposure\n"
+                            f"  🧠 /learn     — Bot insights\n"
+                            f"  📓 /journal   — Trade journal\n"
+                            f"  🌀 /patterns  — Patterns ranked\n"
+                            f"  📰 /news      — Crypto news\n"
+                            f"  🌍 /market    — Market overview\n"
+                            f"  🔍 /scan      — Manual scan\n"
+                            f"  ⚡ /cb        — Circuit breaker\n"
+                            f"  📡 /status    — Live bot status\n"
+                            f"  🔔 /alerts    — Price alerts\n"
+                            f"  📉 /trend BTC — Trend analysis\n"
+                            f"  🆚 /compare BTC ETH — Compare\n"
+                            f"  💎 /gems      — Hidden gems scan\n"
+                            f"  🔬 /backtest BTC — Backtest\n\n"
+                            f"  🕐 {get_ist_time()}",
+                            reply_markup=menu_kb
+                        )
+                    # ── /status + 📡 Status button ──
+                    elif txt_slash in ("/status","📡 status"):
+                        # handled by txt_clean block below — trigger it
+                        pass
+                    # ── Reply keyboard button tap handlers ──
+                    elif txt_clean=="📊 trades":   safe_send(get_active_trades_text,"📊 Trades")
+                    elif txt_clean=="⏳ pending":
+                        if pending_signals:
+                            msg=f"{_H('PENDING SIGNALS','⏳')}\n\n"
+                            for c,s in pending_signals.items():
+                                exp=s.get("expires_at")
+                                exp_str=exp.strftime("%I:%M %p IST") if isinstance(exp,datetime) else "N/A"
+                                dirn_em="🟢 LONG" if s.get("direction")=="BUY" else "🔴 SHORT"
+                                msg+=(f"  🪙 <b>{c}</b>  {dirn_em}\n"
+                                      f"  ◆ {s.get('pattern','?')}\n"
+                                      f"  Score: {s.get('setup_score',0):.0f}  ⏰ {exp_str}\n\n")
+                            msg+=f"  🕐 {get_ist_time()}"
+                            send_telegram(msg)
+                        else:
+                            send_telegram(f"{_H('PENDING SIGNALS','⏳')}\n\n  ⚪ No pending signals right now.\n\n  🕐 {get_ist_time()}")
+                    elif txt_clean=="📈 stats":    safe_send(get_pattern_stats_text,"📈 Stats")
+                    elif txt_clean=="📅 summary":  safe_send(get_10day_summary_text,"📅 Summary")
+                    elif txt_clean=="🔥 streak":   safe_send(get_streak_text,"🔥 Streak")
+                    elif txt_clean=="🏆 best":     safe_send(get_best_text,"🏆 Best")
+                    elif txt_clean in ("🛡️ risk","🛡 risk"):  safe_send(get_risk_text,"🛡 Risk")
+                    elif txt_clean=="🧠 learn":    safe_send(get_learning_text,"🧠 Learn")
+                    elif txt_clean=="📓 journal":  safe_send(get_journal_text,"📓 Journal")
+                    elif txt_clean=="🌀 patterns": safe_send(get_patterns_ranked_text,"🌀 Patterns")
+                    elif txt_clean=="📰 news":
+                        send_telegram("⚙️ Fetching latest news...")
+                        safe_send(get_crypto_news,"📰 News")
+                    elif txt_clean=="🌍 market":   safe_send(cmd_market,"🌍 Market")
+                    elif txt_clean=="🔍 scan":
+                        btc_p2=get_price("BTCUSDT"); btc_k2=get_klines("BTCUSDT","1h",50)
+                        bt_e2=calculate_ema([float(x[4]) for x in btc_k2],50) if btc_k2 else None
+                        bt2=1 if (btc_p2 and bt_e2 and btc_p2>bt_e2) else -1
+                        fg2=get_fear_greed_index()
+                        mc2=detect_market_condition(btc_p2,btc_k2) if btc_p2 and btc_k2 else "sideways"
+                        safe_send(lambda: cmd_scan_manual(bt2,fg2,mc2),"🔍 Scan")
+                    elif txt_clean in ("⚡ cb status","⚡ cb"):
+                        cb_on=check_circuit_breaker()
+                        send_telegram(
+                            f"{_H('CIRCUIT BREAKER','⚡')}\n\n"
+                            f"  Status   : {'🔴 ACTIVE — scanning paused' if cb_on else '🟢 OK — scanning active'}\n"
+                            f"  Losses   : {daily_losses}/{MAX_DAILY_LOSSES}\n"
+                            f"  Resets   : Midnight IST\n\n"
+                            f"  🕐 {get_ist_time()}"
+                        )
+                    elif txt_clean in ("📡 status","📡status"):
+                        btc_p=get_price("BTCUSDT"); fng=get_fear_greed_index()
+                        btc_k=get_klines("BTCUSDT","1h",50)
+                        bt_e=calculate_ema([float(x[4]) for x in btc_k],50) if btc_k else None
+                        bt=1 if (btc_p and bt_e and btc_p>bt_e) else -1
+                        mc=detect_market_condition(btc_p,btc_k) if btc_p and btc_k else "unknown"
+                        sess=is_good_trading_session(); cb=check_circuit_breaker()
+                        btc_crash=is_btc_crashing()
+                        send_telegram(
+                            f"{_H('LIVE BOT STATUS','📡')}\n\n"
+                            f"  {'✅' if sess else '🔴'} Session    : {'ACTIVE' if sess else 'DEAD (2-7AM IST)'}\n"
+                            f"  {'✅' if not cb else '🔴'} CB         : {'OK' if not cb else 'ACTIVE — paused'}\n"
+                            f"  {'✅' if not btc_crash else '🔴'} BTC Crash  : {'OK' if not btc_crash else 'CRASHING'}\n"
+                            f"  {'🟢' if bt==1 else '🔴'} BTC Trend  : {'BULLISH ▲' if bt==1 else 'BEARISH ▼'}\n"
+                            f"  📊 Market   : {mc.upper()}\n"
+                            f"  😰 F&G      : {fng}\n"
+                            f"  📌 Trades   : {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
+                            f"  ⏳ Pending  : {len(pending_signals)}\n"
+                            f"  🔒 Cooldowns: {len(coin_cooldowns)} coins\n"
+                            f"  📉 Losses   : {daily_losses}/{MAX_DAILY_LOSSES}\n"
+                            f"  🎯 Min Score: {MIN_SETUP_SCORE}\n\n"
+                            f"  {'🟢 Bot CAN send signals' if sess and not cb else '🔴 Bot BLOCKED'}\n\n"
+                            f"  🕐 {get_ist_time()}"
+                        )
+                    elif txt_clean=="🔔 alerts":
+                        if price_alerts:
+                            msg=f"{_H('PRICE ALERTS','🔔')}\n\n"
+                            for sym,a in price_alerts.items():
+                                msg+=f"  🔔 <b>{sym}</b>  {a['direction'].upper()}  <code>{format_price(a['price'])}</code>\n"
+                            msg+=f"\n  ➕ /alert BTC 95000 above\n  🕐 {get_ist_time()}"
+                            send_telegram(msg)
+                        else:
+                            send_telegram(f"{_H('PRICE ALERTS','🔔')}\n\n  ⚪ No alerts set.\n\n  ➕ /alert BTC 95000 above\n  🕐 {get_ist_time()}")
+                    elif txt_clean.startswith("📉 trend"):
+                        parts=txt_clean.split(); coin_t=(parts[-1].upper() if len(parts)>1 and parts[-1].upper()!="TREND" else "BTC")+"USDT"
+                        safe_send(lambda: cmd_trend(coin_t),"📉 Trend")
+                    elif txt_clean.startswith("🔬 backtest"):
+                        parts=txt_clean.split(); bc2=(parts[-1].upper() if len(parts)>1 and parts[-1].upper()!="BACKTEST" else "BTC")+"USDT"
+                        send_telegram(f"🔬 Running backtest for <b>{bc2}</b>...")
+                        safe_send(lambda: run_backtest(bc2),"🔬 Backtest")
+                    elif txt_clean in ("💎 hidden gems","/gems"):
+                        safe_send(cmd_hidden_gems,"💎 Hidden Gems")
         except requests.RequestException as e: logger.error(f"Poll network: {e}")
-        except Exception as e: logger.error(f"Poll error: {e}", exc_info=True)
-        time.sleep(1)
+        except Exception as e:                 logger.error(f"Poll error: {e}",exc_info=True)
+        time.sleep(2)
 
 def send_hourly_report():
     r=f"<b>{BOT_HEADER} Hourly Report</b>\n{get_ist_time()}\n{S()}\n\n"
