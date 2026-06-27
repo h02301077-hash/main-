@@ -15,9 +15,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
-CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
-NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAH1apTud3Dl4Eovcshyl2JdBQxmjWM-_v8")
+CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
+NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "f9cad228544447a5a8c283082747b803")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
 BINANCE_KLINE_URL   = "https://data-api.binance.vision/api/v3/klines"
@@ -38,7 +38,7 @@ COINS = list(dict.fromkeys([
     "GMT","ENJ","PEPE","WIF","FLOKI","BONK","ORDI","BOME","NOT","DOGS",
     "JUP","PYTH","JTO","STRK","EIGEN","ETHFI","IO","ZERO","ONDO",
     "BLUR","CFX","METIS","MANTA","ZETA","TRB","ALT","PIXEL","PORTAL","STPT","KAS",
-    "PIPPIN","BSB","CL"
+    "PIPPIN","BSB","RIVER"
 ]))
 
 active_trades             = {}
