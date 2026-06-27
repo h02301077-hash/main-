@@ -15,9 +15,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8778362544:AAGQpQ-XEut6JLUoVlYAsLnOTF0G2q4qZl4")
-CHAT_ID        = os.getenv("CHAT_ID", "8005940008")
-NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "f9cad228544447a5a8c283082747b803")      # CryptoPanic API key (optional)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TOKEN_HERE")
+CHAT_ID        = os.getenv("CHAT_ID", "YOUR_CHAT_ID_HERE")
+NEWS_API_KEY   = os.getenv("NEWS_API_KEY", "")      # CryptoPanic API key (optional)
 
 BINANCE_PRICE_URL   = "https://data-api.binance.vision/api/v3/ticker/price"
 BINANCE_KLINE_URL   = "https://data-api.binance.vision/api/v3/klines"
@@ -206,30 +206,70 @@ def save_pending_signals():
         s={}
         for coin,sig in list(pending_signals.items()):
             d=dict(sig)
-            if isinstance(d.get("timestamp"),datetime): d["timestamp"]=d["timestamp"].isoformat()
-            if isinstance(d.get("expires_at"),datetime): d["expires_at"]=d["expires_at"].isoformat()
-            s[coin]=d
-        with open("pending_signals.json","w") as f: json.dump(s,f)
+            for key in ("timestamp","expires_at"):
+                if isinstance(d.get(key),datetime):
+                    dt=d[key]
+                    if dt.tzinfo is None: dt=IST.localize(dt)
+                    d[key]=dt.isoformat()
+            # Strip non-JSON-serialisable values
+            clean={}
+            for k,v in d.items():
+                if isinstance(v,(str,int,float,bool,list,dict,type(None))): clean[k]=v
+                else: clean[k]=str(v)
+            s[coin]=clean
+        with open("pending_signals.json","w") as f: json.dump(s,f,indent=2)
+        logger.info(f"Saved {len(s)} pending signals.")
     except Exception as e: logger.error(f"save_pending: {e}")
 
 def load_pending_signals():
     global pending_signals
     try:
         if not os.path.exists("pending_signals.json"): return
-        with open("pending_signals.json") as f: data=json.load(f)
-        now=get_ist_datetime()
+        with open("pending_signals.json") as f: raw=f.read().strip()
+        if not raw: return
+        data=json.loads(raw)
+        now=get_ist_datetime(); loaded=0
         for coin,sig in data.items():
+            # Parse expires_at with timezone safety
             if sig.get("expires_at"):
                 try:
                     exp=datetime.fromisoformat(sig["expires_at"])
-                    if now>exp: continue
+                    if exp.tzinfo is None: exp=IST.localize(exp)
+                    if now>exp: logger.info(f"Skip expired {coin}"); continue
                     sig["expires_at"]=exp
-                except Exception: continue
+                except Exception as e:
+                    logger.warning(f"expires_at {coin}: {e} — keeping")
+                    sig["expires_at"]=None
+            # Parse timestamp with timezone safety
             if sig.get("timestamp"):
-                try: sig["timestamp"]=datetime.fromisoformat(sig["timestamp"])
-                except Exception: pass
-            pending_signals[coin]=sig
-        logger.info(f"Loaded {len(pending_signals)} pending signals.")
+                try:
+                    ts=datetime.fromisoformat(sig["timestamp"])
+                    if ts.tzinfo is None: ts=IST.localize(ts)
+                    sig["timestamp"]=ts
+                except Exception: sig["timestamp"]=get_ist_datetime()
+            pending_signals[coin]=sig; loaded+=1
+        logger.info(f"Loaded {loaded}/{len(data)} pending signals.")
+        # Re-announce loaded signals with fresh buttons
+        for coin,sig in list(pending_signals.items()):
+            try:
+                dirn=sig.get("direction","BUY")
+                ep=sig.get("entry",sig.get("scan_price",0))
+                tp=sig.get("tp",0); sl=sig.get("sl",0)
+                exp=sig.get("expires_at")
+                exp_str=exp.strftime("%I:%M %p IST") if isinstance(exp,datetime) else "N/A"
+                dir_em="🌸 LONG" if dirn=="BUY" else "🍂 SHORT"
+                reply_markup={"inline_keyboard":[[
+                    {"text":"✅ Activate Trade","callback_data":f"ACTIVATE_{coin}"},
+                    {"text":"❌ Ignore",        "callback_data":f"IGNORE_{coin}"}
+                ]]}
+                send_telegram(
+                    f"🔄 <b>SIGNAL RESTORED: {coin}</b>\n"
+                    f"{dir_em}  Entry: <code>{format_price(ep)}</code>\n"
+                    f"TP: <code>{format_price(tp)}</code>  SL: <code>{format_price(sl)}</code>\n"
+                    f"Expires: {exp_str}",
+                    reply_markup=reply_markup
+                )
+            except Exception as e: logger.warning(f"Re-announce {coin}: {e}")
     except Exception as e: logger.error(f"load_pending: {e}")
 
 def save_circuit_breaker():
@@ -274,23 +314,22 @@ def get_ist_time():     return datetime.now(IST).strftime("%I:%M:%S %p IST")
 def get_ist_datetime(): return datetime.now(IST)
 
 def send_telegram(text, parse_mode="HTML", reply_markup=None, disable_web_page_preview=True):
-    payload={"chat_id":CHAT_ID,"text":text,"parse_mode":parse_mode,
-             "disable_web_page_preview":disable_web_page_preview}
+    payload={"chat_id":CHAT_ID,"text":text,"disable_web_page_preview":disable_web_page_preview}
+    if parse_mode: payload["parse_mode"]=parse_mode  # omit if empty string
     if reply_markup: payload["reply_markup"]=reply_markup
     try:
         res=requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                           json=payload,timeout=15)
-        if res.status_code!=200:
-            logger.warning(f"Telegram [{res.status_code}]: {res.text[:200]}")
-            # Retry without HTML parse mode if parse error
-            if "parse" in res.text.lower() or "can't parse" in res.text.lower():
-                payload2={"chat_id":CHAT_ID,"text":text,
-                          "disable_web_page_preview":True}
-                if reply_markup: payload2["reply_markup"]=reply_markup
-                res2=requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                                   json=payload2,timeout=15)
-                return res2.status_code==200
-        return res.status_code==200
+        if res.status_code==200: return True
+        logger.warning(f"Telegram [{res.status_code}]: {res.text[:200]}")
+        # Retry as plain text if HTML parse error
+        if "parse" in res.text.lower() or "can't parse" in res.text.lower() or "400" in str(res.status_code):
+            payload2={"chat_id":CHAT_ID,"text":text,"disable_web_page_preview":True}
+            if reply_markup: payload2["reply_markup"]=reply_markup
+            res2=requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                               json=payload2,timeout=15)
+            return res2.status_code==200
+        return False
     except requests.RequestException as e:
         logger.error(f"Telegram error: {e}"); return False
 
@@ -1558,8 +1597,21 @@ def cmd_trend(coin_input):
            f"  │  🎯 Resistance : <code>{format_price(r1)}</code>\n"
            f"  │  🛡️ Support    : <code>{format_price(s1)}</code>\n"
            f"  │  📊 RSI(1h)   : {rsi_1h:.1f}   ADX: {adx_1h:.1f}\n"
-           f"  └─────────────────────────────┘\n\n"
-           f"  🕐 {get_ist_time()}")
+           f"  └─────────────────────────────┘\n")
+    # If BTC trend, also show all active coin levels
+    if coin=="BTC" and active_trades:
+        text+=f"\n  {YT_DIV}\n  ⚔️ <b>Active Coin Levels</b>\n\n"
+        for ac,t in active_trades.items():
+            ap=get_price(t.get("symbol",ac+"USDT"))
+            if not ap: continue
+            a_sup,a_res,_=get_sr_levels(t.get("symbol",ac+"USDT"))
+            a_res_d=abs(a_res-ap)/ap*100 if a_res>0 else 0
+            a_sup_d=abs(ap-a_sup)/ap*100 if a_sup>0 else 0
+            em=YT_WIN if t.get("direction")=="BUY" else YT_LOSS
+            text+=(f"  {em} <b>{ac}</b>  <code>{format_price(ap)}</code>\n"
+                   f"  🚧 Res: <code>{format_price(a_res)}</code> +{a_res_d:.2f}%\n"
+                   f"  🛡 Sup: <code>{format_price(a_sup)}</code> -{a_sup_d:.2f}%\n\n")
+    text+=f"  🕐 {get_ist_time()}"
     return text
 
 def cmd_market():
@@ -1850,6 +1902,81 @@ def cmd_hidden_gems():
     msg += (f"  ⚠️ <i>Always confirm before trading</i>\n"
             f"  🕐 {get_ist_time()}")
     return msg
+
+def get_sr_levels(symbol):
+    klines=get_klines(symbol,"4h",50)
+    if not klines or len(klines)<5: return 0,0,0
+    highs=[float(k[2]) for k in klines]; lows=[float(k[3]) for k in klines]
+    closes=[float(k[4]) for k in klines]
+    pivot=(highs[-2]+lows[-2]+closes[-2])/3
+    r1=2*pivot-lows[-2]; s1=2*pivot-highs[-2]
+    ms=detect_market_structure(klines)
+    if ms["swing_high"]>0: r1=(r1+ms["swing_high"])/2
+    if ms["swing_low"]>0:  s1=(s1+ms["swing_low"])/2
+    return s1,r1,pivot
+
+def cmd_trade_suggestions():
+    if not active_trades:
+        return (_H("BATTLE COUNSEL","🔮")+"\n\n"
+                f"  🌙 No open battles to counsel.\n\n"
+                f"  🕐 {get_ist_time()}")
+    text=_H("BATTLE COUNSEL","🔮")+"\n\n"
+    for coin,t in active_trades.items():
+        symbol=t.get("symbol",coin+"USDT")
+        price=get_price(symbol)
+        if not price: continue
+        dirn=t.get("direction","BUY"); entry=t["entry"]
+        tp=t["tp"]; sl=t["sl"]; lev=t.get("leverage",1)
+        if dirn=="BUY": pnl=((price-entry)/entry)*100*lev
+        else:           pnl=((entry-price)/entry)*100*lev
+        dist_tp=abs(tp-price)/price*100
+        dist_sl=abs(price-sl)/price*100
+        tp_pct=abs(tp-entry)/entry*100
+        progress=pnl/tp_pct*100 if tp_pct>0 else 0
+        klines=get_klines(symbol,"1h",50); rsi=50; trend_label="N/A"; mom=0
+        if klines and len(klines)>3:
+            closes=[float(k[4]) for k in klines]
+            rsi=calculate_rsi(closes)
+            e20=calculate_ema(closes,20); e50=calculate_ema(closes,50)
+            trend_label=get_trend_label(e20,e50,price,"1h")
+            mom=(closes[-1]-closes[-4])/closes[-4]*100 if len(closes)>=4 else 0
+        sup,res,_=get_sr_levels(symbol)
+        is_near_tp=dist_tp<tp_pct*0.1
+        trend_favours=("Up" in trend_label and dirn=="BUY") or ("Down" in trend_label and dirn=="SELL")
+        rsi_extreme=(rsi>72 and dirn=="BUY") or (rsi<28 and dirn=="SELL")
+        mom_fading=(mom<-1.5 and dirn=="BUY") or (mom>1.5 and dirn=="SELL")
+        near_bad_level=((dirn=="BUY" and res>0 and abs(price-res)/price<0.015) or
+                        (dirn=="SELL" and sup>0 and abs(price-sup)/price<0.015))
+        is_near_sl=dist_sl<abs(entry-sl)/entry*100*0.15
+        if pnl>=0 and is_near_tp:
+            suggestion="🌸 TAKE PROFIT — target almost reached"
+            detail=f"Price is {dist_tp:.1f}% from target."
+        elif pnl>0 and (rsi_extreme or mom_fading or near_bad_level):
+            suggestion="⚠️ WATCH OUT — momentum fading"
+            detail="RSI extreme" if rsi_extreme else "Momentum reversing" if mom_fading else "Near key level"
+        elif pnl<0 and is_near_sl:
+            suggestion="🍂 EXIT NOW — SL almost hit"
+            detail=f"Price is {dist_sl:.1f}% from your stop."
+        elif pnl<0 and not trend_favours:
+            suggestion="🌙 REVERSE RISK — trend against you"
+            detail=f"1h trend: {trend_label}"
+        elif trend_favours and not rsi_extreme and pnl>=0:
+            suggestion="⚔️ HOLD — trend aligned"
+            detail=f"{progress:.0f}% of the way to target."
+        else:
+            suggestion="📜 HOLD — no strong signal to act"
+            detail="Market undecided. Maintain SL."
+        dirn_em=YT_WIN+" LONG" if dirn=="BUY" else YT_LOSS+" SHORT"
+        text+=(f"  {YT_DIV}\n"
+               f"  🪙 <b>{coin}</b>  {dirn_em}  •  {fmt_pnl(pnl)}\n\n"
+               f"  {suggestion}\n  ▸ {detail}\n\n"
+               f"  ▸ Progress: {progress:.0f}%  RSI: {rsi:.1f}  Mom: {mom:+.2f}%\n"
+               f"  ▸ Trend(1h): {trend_label}\n")
+        if res>0: text+=f"  🚧 Resistance: <code>{format_price(res)}</code>\n"
+        if sup>0: text+=f"  🛡 Support: <code>{format_price(sup)}</code>\n"
+        text+="\n"
+    text+=f"  {YT_BOT}\n  🕐 {get_ist_time()}"
+    return text
 
 def expire_pending_signals():
     now=get_ist_datetime()
@@ -2342,6 +2469,25 @@ def poll_telegram():
                         send_telegram(f"⚙️ Fetching latest news...")
                         safe_send(get_crypto_news,"📰 News")
                     elif txt_slash=="/gems":    safe_send(cmd_hidden_gems,"💎 Hidden Gems")
+                    elif txt_slash=="/counsel": safe_send(cmd_trade_suggestions,"🔮 Counsel")
+                    elif txt_slash=="/quickstats":
+                        total=len(trade_journal); wins=sum(1 for t in trade_journal if t.get("result")=="WIN")
+                        wr=(wins/total*100) if total>0 else 0
+                        today=str(datetime.now(IST).date())
+                        td=[t for t in trade_journal if t.get("date")==today]
+                        tw=sum(1 for t in td if t.get("result")=="WIN"); tl=sum(1 for t in td if t.get("result")=="LOSS")
+                        tpnl=sum(t.get("pnl",0) for t in td)
+                        btc=get_price("BTCUSDT"); fng=get_fear_greed_index()
+                        send_telegram(
+                            _H("QUICK STATS","📜")+"\n\n"
+                            f"  ⚔️ Today: {tw}W / {tl}L  •  {fmt_pnl(tpnl)}\n"
+                            f"  🗻 All Time: {total} trades  WR: <b>{wr:.1f}%</b>\n"
+                            f"  ₿ BTC: <code>${format_price(btc) if btc else 'N/A'}</code>\n"
+                            f"  😰 F&G: {fng}\n"
+                            f"  ⚔️ Open: {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
+                            f"  ⏳ Scouts: {len(pending_signals)}\n"
+                            f"  🕐 {get_ist_time()}"
+                        )
                     elif txt_slash=="/market":   safe_send(cmd_market,"🌍 Market")
                     elif txt_slash=="/cb":
                         cb_on=check_circuit_breaker()
@@ -2392,6 +2538,7 @@ def poll_telegram():
                                 [{"text":"🌀 Patterns"}, {"text":"📰 News"},      {"text":"🌍 Market"}],
                                 [{"text":"🔍 Scan"},     {"text":"⚡ CB Status"}, {"text":"📡 Status"}],
                                 [{"text":"🔔 Alerts"},   {"text":"📉 Trend BTC"}, {"text":"💎 Hidden Gems"}],
+                                [{"text":"🔮 Counsel"},  {"text":"🌐 Multi Trend"},{"text":"📜 Quick Stats"}],
                             ],
                             "resize_keyboard":True,
                             "persistent":True
@@ -2512,6 +2659,28 @@ def poll_telegram():
                         safe_send(lambda: run_backtest(bc2),"🔬 Backtest")
                     elif txt_clean in ("💎 hidden gems","/gems"):
                         safe_send(cmd_hidden_gems,"💎 Hidden Gems")
+                    elif txt_clean in ("🔮 counsel","/counsel"):
+                        safe_send(cmd_trade_suggestions,"🔮 Counsel")
+                    elif txt_clean in ("🌐 multi trend","/multitrend"):
+                        safe_send(lambda: cmd_trend("BTC"),"🌐 Multi Trend")
+                    elif txt_clean in ("📜 quick stats","/quickstats"):
+                        total=len(trade_journal); wins=sum(1 for t in trade_journal if t.get("result")=="WIN")
+                        wr=(wins/total*100) if total>0 else 0
+                        today=str(datetime.now(IST).date())
+                        td=[t for t in trade_journal if t.get("date")==today]
+                        tw=sum(1 for t in td if t.get("result")=="WIN"); tl=sum(1 for t in td if t.get("result")=="LOSS")
+                        tpnl=sum(t.get("pnl",0) for t in td)
+                        btc=get_price("BTCUSDT"); fng=get_fear_greed_index()
+                        send_telegram(
+                            _H("QUICK STATS","📜")+"\n\n"
+                            f"  ⚔️ Today: {tw}W / {tl}L  •  {fmt_pnl(tpnl)}\n"
+                            f"  🗻 All Time: {total} trades  WR: <b>{wr:.1f}%</b>\n"
+                            f"  ₿ BTC: <code>${format_price(btc) if btc else 'N/A'}</code>\n"
+                            f"  😰 F&G: {fng}\n"
+                            f"  ⚔️ Open: {len(active_trades)}/{MAX_ACTIVE_TRADES}\n"
+                            f"  ⏳ Scouts: {len(pending_signals)}\n"
+                            f"  🕐 {get_ist_time()}"
+                        )
         except requests.RequestException as e: logger.error(f"Poll network: {e}")
         except Exception as e:                 logger.error(f"Poll error: {e}",exc_info=True)
         time.sleep(2)
